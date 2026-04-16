@@ -20,10 +20,8 @@ def load_config(config_path: Optional[str] = None) -> DictConfig:
     """
     if config_path is not None and Path(config_path).exists():
         config = OmegaConf.load(config_path)
-        logger.info(f"Loaded configuration from {config_path}")
     else:
         config = get_default_config()
-        logger.info("Using default configuration")
     
     return config
 

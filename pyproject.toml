@@ -77,6 +77,13 @@ target-version = ['py312']
 profile = "black"
 line_length = 88
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true

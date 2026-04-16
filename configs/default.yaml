@@ -61,3 +61,12 @@ evaluation:
   render: false
   save_videos: false
   video_dir: "videos"
+
+sim:
+  difficulty: "easy"
+  render_size: "128x128"
+  seed: 42
+  output_dir: "pushing_data/"
+  collect_episodes: 100
+  rl_episodes: 1000
+  rl_difficulty: "medium"
