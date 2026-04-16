@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# IDEs
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# ML/Data Science
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npz
+*.npy
+checkpoints/
+logs/
+wandb/
+*.tfrecord
+*.tfrecords
+data/
+datasets/
+models/
+outputs/
+results/
+experiments/
+
+# MLX specific
+*.mlx
+
+# TensorFlow
+*.pb
+saved_model/
+*.tflite
+
+# PyTorch
+*.pth
+*.pt
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+videos/
+images/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.out
+*.err
+
+# Configuration overrides
+configs/local_*.yaml
+configs/secret_*.yaml
+.env.local
+.env.secret
+
+# Documentation
+docs/_build/

@@ -1,0 +1,63 @@
+# Default configuration for World Model Pusher
+
+model:
+  type: "world_model_encoder"
+  observation_dim: 84
+  action_dim: 6
+  latent_dim: 256
+  num_layers: 4
+  num_heads: 8
+  dropout_rate: 0.1
+
+training:
+  batch_size: 32
+  learning_rate: 0.0001  # 1e-4
+  num_epochs: 100
+  warmup_steps: 1000
+  gradient_clipping: 1.0
+  save_every: 10
+  eval_every: 5
+
+data:
+  tfrecord_path: "data/train.tfrecord"
+  val_tfrecord_path: "data/val.tfrecord"
+  shuffle: true
+  buffer_size: 10000
+  num_parallel_calls: 4
+  prefetch_buffer: 2
+
+optimizer:
+  type: "adamw"
+  weight_decay: 0.00001  # 1e-5
+  betas: [0.9, 0.999]
+  eps: 0.00000001  # 1e-8
+
+scheduler:
+  type: "cosine_annealing"
+  T_max: 100
+  eta_min: 0.000001  # 1e-6
+
+logging:
+  use_wandb: true
+  project_name: "world-model-pusher"
+  log_every: 100
+  save_dir: "checkpoints"
+  experiment_name: null  # Will be auto-generated if null
+
+hardware:
+  device: "auto"  # "auto", "cpu", "gpu", "mps"
+  mixed_precision: false
+  compile_model: false
+
+environment:
+  name: "pusher"
+  observation_type: "pixels"  # "pixels", "state", "mixed"
+  action_space: "continuous"  # "continuous", "discrete"
+  reward_type: "sparse"       # "sparse", "dense"
+  episode_length: 1000
+
+evaluation:
+  num_episodes: 10
+  render: false
+  save_videos: false
+  video_dir: "videos"
