@@ -1,6 +1,7 @@
 """Configuration management using OmegaConf."""
 
 from omegaconf import DictConfig, OmegaConf
+from typing import cast
 from pathlib import Path
 from typing import Optional
 import logging
@@ -20,7 +21,7 @@ def load_config(config_path: Optional[str] = None) -> DictConfig:
         Configuration object
     """
     if config_path is not None and Path(config_path).exists():
-        config = OmegaConf.load(config_path)
+        config = cast(DictConfig, OmegaConf.load(config_path))
     else:
         config = get_default_config()
 
@@ -33,7 +34,7 @@ def get_default_config() -> DictConfig:
     # Try to load from default.yaml first
     default_config_path = Path(
         __file__).parent.parent.parent / "configs" / "default.yaml"
-    return OmegaConf.load(default_config_path)
+    return cast(DictConfig, OmegaConf.load(default_config_path))
 
 
 def save_config(config: DictConfig, save_path: str) -> None:
@@ -62,7 +63,7 @@ def merge_configs(
     Returns:
         Merged configuration
     """
-    return OmegaConf.merge(base_config, override_config)
+    return cast(DictConfig, OmegaConf.merge(base_config, override_config))
 
 
 def validate_config(config: DictConfig) -> bool:

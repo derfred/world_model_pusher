@@ -52,6 +52,8 @@ dependencies = [
     "ipykernel>=6.25.0",
     "ipywidgets>=8.1.0",
     "lxml>=6.0.4",
+    "lxml-stubs>=0.5.1",
+    "types-tqdm>=4.67.3.20260408",
 ]
 
 [project.optional-dependencies]

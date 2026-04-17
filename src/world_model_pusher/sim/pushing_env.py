@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import gymnasium as gym
-import mujoco
+import mujoco  # type: ignore[import-untyped]
 import numpy as np
 from gymnasium import spaces
 
@@ -128,7 +128,7 @@ class PushingEnv(gym.Env):
         if self.renderer is None or self.data is None:
             return None
         self.renderer.update_scene(self.data)
-        return self.renderer.render()
+        return np.asarray(self.renderer.render())
 
     def close(self) -> None:
         if self.renderer is not None:
@@ -171,4 +171,5 @@ class PushingEnv(gym.Env):
             self.model,
             mujoco.mjtObj.mjOBJ_BODY,
             "target_object")
-        return self.data.xpos[body_id][:2].copy().astype(np.float32)
+        return np.asarray(
+            self.data.xpos[body_id][:2].copy(), dtype=np.float32)

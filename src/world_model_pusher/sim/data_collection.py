@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import h5py
+import h5py  # type: ignore[import-untyped]
 import numpy as np
 
 from .scene_config import SceneConfig

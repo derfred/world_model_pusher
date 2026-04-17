@@ -6,9 +6,9 @@ import math
 import os
 from pathlib import Path
 
-import mujoco
+import mujoco  # type: ignore[import-untyped]
 import numpy as np
-from lxml import etree
+from lxml import etree  # type: ignore[import-untyped]
 
 from .scene_config import ObjectConfig, SceneConfig
 
