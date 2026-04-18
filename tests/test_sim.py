@@ -19,7 +19,6 @@ from src.world_model_pusher.sim import (
     SceneBuilder,
     SceneConfig,
     SceneGenerator,
-    create_default_base_mjcf,
 )
 
 
@@ -58,15 +57,8 @@ def _make_simple_config() -> SceneConfig:
 
 
 @pytest.fixture
-def base_mjcf_path(tmp_path):
-    path = str(tmp_path / "base.xml")
-    create_default_base_mjcf(path)
-    return path
-
-
-@pytest.fixture
-def builder(base_mjcf_path):
-    return SceneBuilder(base_mjcf_path)
+def builder():
+    return SceneBuilder()
 
 
 @pytest.fixture
@@ -203,14 +195,12 @@ class TestSceneBuilder:
             model, mujoco.mjtObj.mjOBJ_BODY, "obstacle_0")
         assert obs_id >= 0
 
-    def test_create_default_base_mjcf(self, tmp_path):
-        path = str(tmp_path / "test_base.xml")
-        create_default_base_mjcf(path)
-        assert os.path.exists(path)
-        with open(path) as f:
-            content = f.read()
+    def test_simple_arm_xml_exists(self):
+        from src.world_model_pusher.sim.scene_builder import _SIMPLE_ARM_XML
+        assert _SIMPLE_ARM_XML.exists()
+        content = _SIMPLE_ARM_XML.read_text()
         assert "mocap_target" in content
-        assert "ee_link" in content
+        assert "ee_frame" in content
         assert "weld" in content
 
 
