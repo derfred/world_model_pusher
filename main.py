@@ -59,15 +59,15 @@ def _parse_render_size(render_size: str) -> tuple[int, int]:
   return int(h_str), int(w_str)
 
 
-@cli.command("collect-data")
+@cli.command("generate-scenes")
 @click.option("--episodes", default=10, type=int, help="Number of episodes to collect")
 @click.option("--output", default=None, type=str, help="Output directory")
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
 @click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
 @click.option("--seed", default=None, type=int, help="Random seed")
 @click.pass_context
-def collect_data(ctx, episodes, output, difficulty, render_size, seed):
-  """Collect pushing episodes using a random push policy."""
+def generate_scenes(ctx, episodes, output, difficulty, render_size, seed):
+  """Generate pushing scenes using a random push policy."""
   from dataclasses import asdict
   from tqdm import tqdm
 
@@ -125,79 +125,6 @@ def collect_data(ctx, episodes, output, difficulty, render_size, seed):
 
   env.close()
   click.echo(f"Done. Avg reward per step: {total_reward / max(1, episodes):.4f}")
-
-
-@cli.command("rl-loop")
-@click.option("--episodes", default=None, type=int, help="Number of episodes")
-@click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
-@click.option("--seed", default=None, type=int, help="Random seed")
-@click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
-@click.pass_context
-def rl_loop(ctx, episodes, difficulty, seed, render_size):
-  """Run online RL loop with a random policy, logging episode rewards."""
-  from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-  )
-
-  from src.world_model_pusher.sim import (
-    PushingEnv,
-    SceneBuilder,
-    SceneGenerator,
-    random_push_policy,
-  )
-
-  cfg = _resolve_sim_cfg(ctx, {
-    "rl_episodes": episodes,
-    "rl_difficulty": difficulty,
-    "seed": seed,
-    "render_size": render_size,
-  })
-  episodes           = cfg["rl_episodes"]
-  difficulty         = cfg["rl_difficulty"]
-  resolved_seed      = _resolve_seed(cfg, seed)
-  render_h, render_w = _parse_render_size(cfg["render_size"])
-
-  builder   = SceneBuilder()
-  env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
-  rng       = np.random.default_rng(resolved_seed)
-
-  click.echo(f"Starting RL loop: {episodes} episodes, difficulty={difficulty}, seed={resolved_seed}")
-
-  with Progress(
-    TextColumn("[progress.description]{task.description}"),
-    BarColumn(),
-    MofNCompleteColumn(),
-    TimeElapsedColumn(),
-    TextColumn("ep_reward={task.fields[ep_reward]:.3f} avg={task.fields[avg_reward]:.3f}"),
-  ) as progress:
-    task = progress.add_task(
-      "RL loop", total=episodes, ep_reward=0.0, avg_reward=0.0
-    )
-    total_reward = 0.0
-
-    for ep_idx in range(episodes):
-      config = generator.sample(rng)
-      obs, _ = env.reset(config=config)
-      done = False
-      ep_reward = 0.0
-
-      while not done:
-        action = random_push_policy(obs, config, rng)
-        obs, reward, terminated, truncated, _ = env.step(action)
-        ep_reward += reward
-        done = terminated or truncated
-
-      total_reward += ep_reward
-      avg_reward = total_reward / (ep_idx + 1)
-      progress.update(task, advance=1, ep_reward=ep_reward, avg_reward=avg_reward)
-
-  env.close()
-  click.echo(f"Finished. Average episode reward: {total_reward / episodes:.4f}")
 
 @cli.command("show-scene")
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
