@@ -1,6 +1,6 @@
 """Load sim-collected episodes into the replay buffer.
 
-The episode writers in ``world_model_pusher.sim.data_collection`` record
+The episode writers in ``chuck_dreamer.sim.data_collection`` record
 T steps of ``(image, action, reward, joint_qpos, ee_pos, ee_quat,
 object_xy, timestamp)`` per file. The replay buffer expects a different
 schema (``obs``, ``action``, ``reward``, ``done``) with one extra obs

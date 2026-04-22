@@ -6,7 +6,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from src.world_model_pusher.dreamer import ReplayBuffer
+from src.chuck_dreamer.dreamer import ReplayBuffer
 
 
 # ---------------------------------------------------------------------------

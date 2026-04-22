@@ -1,4 +1,4 @@
-# World Model Pusher
+# Chuck Dreamer
 
 ## Installation
 

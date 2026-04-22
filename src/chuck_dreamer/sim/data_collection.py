@@ -174,7 +174,7 @@ class RerunEpisodeWriter:
 
         ep_path = self.output_dir / f"episode_{self._ep_count:05d}.rrd"
         rec = rr.RecordingStream(
-            application_id="world_model_pusher",
+            application_id="chuck_dreamer",
             recording_id=f"episode_{self._ep_count:05d}",
         )
 

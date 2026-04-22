@@ -1,7 +1,7 @@
 [project]
-name = "world-model-pusher"
+name = "chuck-dreamer"
 version = "0.1.0"
-description = "Robot Learning Group Project: World Model Pusher"
+description = "Robot Learning Group Project: Chuck Dreamer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

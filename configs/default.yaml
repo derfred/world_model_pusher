@@ -1,4 +1,4 @@
-# Default configuration for World Model Pusher
+# Default configuration for Chuck Dreamer
 
 model:
   type: "world_model_encoder"
@@ -39,7 +39,7 @@ scheduler:
 
 logging:
   use_wandb: true
-  project_name: "world-model-pusher"
+  project_name: "chuck-dreamer"
   log_every: 100
   save_dir: "checkpoints"
   experiment_name: null  # Will be auto-generated if null

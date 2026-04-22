@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-World Model Pusher: A Robotics and Machine Learning Project
+Chuck Dreamer: A Robotics and Machine Learning Project
 
 This is the main entry point for the project. It provides a CLI interface
 for training models, processing data, and running experiments.
@@ -15,7 +15,7 @@ import sys
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent / "src"))
 
-from src.world_model_pusher.config import load_config
+from src.chuck_dreamer.config import load_config
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.pass_context
 def cli(ctx, config, verbose):
-    """World Model Pusher CLI - Robotics ML with MLX."""
+    """Chuck Dreamer CLI - Robotics ML with MLX."""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
@@ -71,7 +71,7 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   from dataclasses import asdict
   from tqdm import tqdm
 
-  from src.world_model_pusher.sim import (
+  from src.chuck_dreamer.sim import (
     EpisodeWriter,
     PushingEnv,
     RandomPushPolicy,
@@ -139,7 +139,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   import mujoco
   import mujoco.viewer
 
-  from src.world_model_pusher.sim import (
+  from src.chuck_dreamer.sim import (
     PushingEnv,
     RandomPushPolicy,
     SceneBuilder,

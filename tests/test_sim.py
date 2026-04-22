@@ -9,7 +9,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from src.world_model_pusher.sim import (
+from src.chuck_dreamer.sim import (
     CameraConfig,
     EpisodeWriter,
     LightingConfig,
@@ -201,7 +201,7 @@ class TestSceneBuilder:
         assert obs_id >= 0
 
     def test_simple_arm_xml_exists(self):
-        from src.world_model_pusher.sim.scene_builder import _SIMPLE_ARM_XML
+        from src.chuck_dreamer.sim.scene_builder import _SIMPLE_ARM_XML
         assert _SIMPLE_ARM_XML.exists()
         content = _SIMPLE_ARM_XML.read_text()
         assert "ee_frame" in content

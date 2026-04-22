@@ -1,1 +1,1 @@
-"""Tests for World Model Pusher project."""
+"""Tests for Chuck Dreamer project."""
