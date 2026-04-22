@@ -81,6 +81,10 @@ python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 
+[[tool.mypy.overrides]]
+module = ["mlx", "mlx.*"]
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
