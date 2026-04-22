@@ -56,7 +56,6 @@ wandb/
 *.tfrecords
 data/
 datasets/
-models/
 outputs/
 results/
 experiments/

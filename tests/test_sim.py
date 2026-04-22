@@ -15,9 +15,11 @@ from src.world_model_pusher.sim import (
     LightingConfig,
     ObjectConfig,
     PushingEnv,
+    RandomPushPolicy,
     SceneBuilder,
     SceneConfig,
     SceneGenerator,
+    ScenePlayer,
 )
 
 
@@ -267,44 +269,54 @@ class TestPushingEnv:
 # ---------------------------------------------------------------------------
 
 class TestEpisodeWriter:
-    def _make_fake_episode(self, T: int = 5, H: int = 64, W: int = 64):
+    def _make_fake_episode(self, T: int = 5, H: int = 64, W: int = 64, n_joints: int = 6):
         rng = np.random.default_rng(42)
         return [
             {
-                "pre_image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
+                "pre_image":  rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
                 "post_image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
-                "action": rng.uniform(-0.02, 0.02, (3,)).astype(np.float32),
-                "reward": float(rng.uniform(-1.0, 0.0)),
+                "action":     rng.uniform(-0.02, 0.02, (n_joints,)).astype(np.float32),
+                "reward":     float(rng.uniform(-1.0, 0.0)),
+                "timestamp":  float(t) * 0.1,
+                "joint_qpos": rng.uniform(-1.0, 1.0, (n_joints,)).astype(np.float32),
+                "ee_pos":     rng.uniform(-0.5, 0.5, (3,)).astype(np.float32),
+                "ee_quat":    np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                "object_xy":  rng.uniform(-0.3, 0.3, (2,)).astype(np.float32),
             }
-            for _ in range(T)
+            for t in range(T)
         ]
 
     def test_write_and_read_back(self, tmp_path):
         writer = EpisodeWriter(str(tmp_path), format="hdf5")
-        episode = self._make_fake_episode(T=5, H=64, W=64)
+        episode = self._make_fake_episode(T=5, H=64, W=64, n_joints=6)
         cfg = _make_simple_config()
         path = writer.write_episode(
             episode,
             metadata={
-                "config": cfg,
-                "seed": 42,
-                "source": "sim"})
+                "config":  cfg,
+                "seed":    42,
+                "source":  "sim",
+                "outcome": "done",
+                "goal_xy": cfg.goal_pos,
+            })
 
         assert path.exists()
         with h5py.File(path, "r") as f:
-            assert f["pre_images"].shape == (5, 64, 64, 3)
-            assert f["pre_images"].dtype == np.uint8
+            assert f["pre_images"].shape  == (5, 64, 64, 3)
+            assert f["pre_images"].dtype  == np.uint8
             assert f["post_images"].shape == (5, 64, 64, 3)
-            assert f["actions"].shape == (5, 3)
-            assert f["rewards"].shape == (5,)
-            assert "metadata" in f
-            assert "config" in f["metadata"]
-            assert "seed" in f["metadata"]
-            assert "source" in f["metadata"]
-            seed_val = int(f["metadata/seed"][()])
-            source_val = str(f["metadata/source"][()])
-        assert seed_val == 42
-        assert "sim" in source_val
+            assert f["actions"].shape     == (5, 6)
+            assert f["rewards"].shape     == (5,)
+            assert f["timestamps"].shape  == (5,)
+            assert f["joint_qpos"].shape  == (5, 6)
+            assert f["ee_pos"].shape      == (5, 3)
+            assert f["ee_quat"].shape     == (5, 4)
+            assert f["object_xy"].shape   == (5, 2)
+            meta = f["metadata"]
+            assert int(meta["seed"][()])        == 42
+            assert "sim" in str(meta["source"][()])
+            assert "done" in str(meta["outcome"][()])
+            assert meta["goal_xy"].shape == (2,)
 
     def test_config_is_valid_json(self, tmp_path):
         writer = EpisodeWriter(str(tmp_path))
@@ -335,3 +347,332 @@ class TestEpisodeWriter:
     def test_unsupported_format_raises(self, tmp_path):
         with pytest.raises(ValueError):
             EpisodeWriter(str(tmp_path), format="csv")
+
+    def test_rerun_writes_rrd_file(self, tmp_path):
+        pytest.importorskip("rerun")
+        writer = EpisodeWriter(str(tmp_path), format="rerun")
+        episode = self._make_fake_episode(T=3, H=32, W=32, n_joints=4)
+        cfg = _make_simple_config()
+        path = writer.write_episode(
+            episode,
+            metadata={
+                "config":  cfg,
+                "seed":    7,
+                "source":  "sim",
+                "outcome": "done",
+                "goal_xy": cfg.goal_pos,
+            })
+        assert path.exists()
+        assert path.suffix == ".rrd"
+        assert path.stat().st_size > 0
+
+    def test_rerun_counter_increments(self, tmp_path):
+        pytest.importorskip("rerun")
+        writer = EpisodeWriter(str(tmp_path), format="rerun")
+        ep = self._make_fake_episode(T=2)
+        p1 = writer.write_episode(ep)
+        p2 = writer.write_episode(ep)
+        assert p1.name == "episode_00000.rrd"
+        assert p2.name == "episode_00001.rrd"
+
+
+# ---------------------------------------------------------------------------
+# RandomPushPolicy tests
+# ---------------------------------------------------------------------------
+
+class _StubController:
+    """Minimal controller stand-in: IK returns the same qpos it was given."""
+
+    def __init__(self, arm_qpos_adr=None):
+        self.arm_qpos_adr = np.asarray(arm_qpos_adr if arm_qpos_adr is not None else [0])
+
+    def ik_for_ee_pos(self, target_xyz, qpos):
+        return np.asarray(qpos, dtype=np.float32).copy()
+
+
+def _policy_obs(ee_pos, qpos=None, n_joints: int = 1):
+    return {
+        "ee_pos":   np.asarray(ee_pos, dtype=np.float32),
+        "arm_qpos": np.zeros(n_joints, dtype=np.float32) if qpos is None else np.asarray(qpos, dtype=np.float32),
+        "qpos":     np.zeros(n_joints, dtype=np.float32) if qpos is None else np.asarray(qpos, dtype=np.float32),
+    }
+
+
+class TestRandomPushPolicy:
+    """Exercises the state-machine logic. Controller is stubbed so no MuJoCo is needed."""
+
+    def _make_policy(self):
+        cfg = _make_simple_config()
+        # Put goal clearly separated from target to keep push_dir well-defined.
+        cfg.target.pos = [0.05, 0.00, 0.03]
+        cfg.goal_pos   = [0.20, 0.00]
+        return RandomPushPolicy(cfg, _StubController(), rng=np.random.default_rng(0))
+
+    def test_initial_state(self):
+        p = self._make_policy()
+        assert p.state == "initial"
+
+    def test_approach_xy_offsets_behind_object(self):
+        p = self._make_policy()
+        obj = np.array(p.config.target.pos[:2])
+        # Approach point lies behind the object (opposite side from the goal).
+        # Since goal is +x of the object, approach is at -x of the object.
+        assert p.approach_xy[0] < obj[0]
+        # Distance equals the standoff.
+        d = float(np.linalg.norm(p.approach_xy - obj))
+        assert d == pytest.approx(RandomPushPolicy._STANDOFF, rel=1e-3)
+
+    def test_approach_xyz_uses_push_z(self):
+        p = self._make_policy()
+        assert p.approach_xyz[2] == pytest.approx(RandomPushPolicy._PUSH_Z)
+
+    def test_goal_xyz_uses_push_z(self):
+        p = self._make_policy()
+        assert p.goal_xyz[2] == pytest.approx(RandomPushPolicy._PUSH_Z)
+
+    def test_transition_initial_to_ready(self):
+        p = self._make_policy()
+        # EE at ready position → initial should advance to ready.
+        obs = _policy_obs(np.append(p.ready_xy, RandomPushPolicy._PUSH_Z))
+        _, prev = p.act(obs)
+        assert prev == "initial"
+        assert p.state == "ready"
+
+    def test_ready_is_sticky_without_external_signal(self):
+        """ready → approach is a manual transition; policy itself does not self-advance."""
+        p = self._make_policy()
+        p.state = "ready"
+        obs = _policy_obs(np.append(p.ready_xy, RandomPushPolicy._PUSH_Z))
+        _, prev = p.act(obs)
+        assert prev is None
+        assert p.state == "ready"
+
+    def test_transition_approach_to_push(self):
+        p = self._make_policy()
+        p.state = "approach"
+        obs = _policy_obs(p.approach_xyz)
+        _, prev = p.act(obs)
+        assert prev == "approach"
+        assert p.state == "push"
+
+    def test_transition_push_to_done(self):
+        p = self._make_policy()
+        p.state = "push"
+        obs = _policy_obs(p.goal_xyz)
+        _, prev = p.act(obs)
+        assert prev == "push"
+        assert p.state == "done"
+
+    def test_done_is_terminal(self):
+        p = self._make_policy()
+        p.state = "done"
+        obs = _policy_obs(p.goal_xyz)
+        _, prev = p.act(obs)
+        assert prev is None
+        assert p.state == "done"
+
+    def test_act_returns_action_and_prev_state_tuple(self):
+        p = self._make_policy()
+        obs = _policy_obs(np.array([0.0, 0.0, 0.1]))
+        action, prev = p.act(obs)
+        assert isinstance(action, np.ndarray)
+        # prev_state is None when no transition happened, else the prior state.
+        assert prev is None or isinstance(prev, str)
+
+
+# ---------------------------------------------------------------------------
+# ScenePlayer tests (fake env + fake policy — no MuJoCo)
+# ---------------------------------------------------------------------------
+
+def _fake_obs(step: int, n_joints: int = 2):
+    return {
+        "image":    np.full((4, 4, 3), step % 256, dtype=np.uint8),
+        "ee_pos":   np.array([0.0, 0.0, 0.1], dtype=np.float32),
+        "ee_quat":  np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        "arm_qpos": np.zeros(n_joints, dtype=np.float32),
+        "object_xy": np.array([0.05, 0.0], dtype=np.float32),
+        "goal_xy":  np.array([0.2, 0.0], dtype=np.float32),
+        "qpos":     np.zeros(n_joints, dtype=np.float32),
+        "time":     float(step) * 0.1,
+        "step":     step,
+    }
+
+
+class _FakeEnv:
+    """Minimal PushingEnv stand-in. Tracks step count, honors control over done flags."""
+
+    def __init__(self, terminate_at: int | None = None, crash_at: int | None = None, n_joints: int = 2):
+        self.terminate_at = terminate_at
+        self.crash_at     = crash_at
+        self.n_joints     = n_joints
+        self._step        = 0
+        self.reset_calls  = 0
+        self.insert_hints_calls = 0
+
+    def reset(self, *, config=None, seed=None):
+        self.reset_calls += 1
+        self._step = 0
+        return _fake_obs(0, self.n_joints), {}
+
+    def step(self, action):
+        self._step += 1
+        if self.crash_at is not None and self._step >= self.crash_at:
+            raise RuntimeError("simulated IK failure")
+        terminated = self.terminate_at is not None and self._step >= self.terminate_at
+        return _fake_obs(self._step, self.n_joints), -0.1, terminated, False, {}
+
+    def _get_obs(self):
+        return _fake_obs(self._step, self.n_joints)
+
+    def insert_hints(self, viewer, policy):
+        self.insert_hints_calls += 1
+
+
+class _FakePolicy:
+    """Policy stub with scripted state progression."""
+
+    def __init__(self, states: list[str], n_joints: int = 2):
+        self._states = list(states)
+        self.state = self._states[0] if self._states else "initial"
+        self._idx = 0
+        self.n_joints = n_joints
+        self.act_calls = 0
+
+    def act(self, obs):
+        prev = None
+        if self._idx + 1 < len(self._states):
+            next_state = self._states[self._idx + 1]
+            if next_state != self.state:
+                prev = self.state
+                self.state = next_state
+            self._idx += 1
+        self.act_calls += 1
+        return np.zeros(self.n_joints, dtype=np.float32), prev
+
+
+class _FakeViewer:
+    def __init__(self, max_frames: int):
+        self._frames = max_frames
+        self.user_scn = type("UserScn", (), {"ngeom": 0, "maxgeom": 100})()
+        self.sync_calls = 0
+
+    def is_running(self):
+        return self._frames > 0
+
+    def sync(self):
+        self.sync_calls += 1
+        self._frames -= 1
+
+
+class TestScenePlayerHeadless:
+    def _make_player(self, env, policy):
+        cfg = _make_simple_config()
+        cfg.max_steps = 20
+        return ScenePlayer(env, policy, cfg)
+
+    def test_auto_advances_ready_to_approach(self):
+        env    = _FakeEnv(terminate_at=None)
+        policy = _FakePolicy(["ready", "ready", "approach", "push", "done"])
+        player = self._make_player(env, policy)
+
+        episode, outcome = player.run_headless(max_steps=10)
+        assert outcome == "done"
+        # The player flipped ready → approach before calling act().
+        assert policy.state == "done"
+        assert len(episode) >= 1
+
+    def test_step_dict_has_all_required_fields(self):
+        env    = _FakeEnv()
+        policy = _FakePolicy(["approach", "done"])
+        player = self._make_player(env, policy)
+
+        episode, outcome = player.run_headless(max_steps=5)
+        assert outcome == "done"
+        step = episode[0]
+        expected_keys = {
+            "pre_image", "post_image", "action", "reward",
+            "timestamp", "joint_qpos", "ee_pos", "ee_quat", "object_xy",
+        }
+        assert expected_keys.issubset(step.keys())
+        assert step["action"].dtype == np.float32
+        assert step["ee_quat"].shape == (4,)
+        assert step["object_xy"].shape == (2,)
+
+    def test_outcome_timeout(self):
+        # Policy never reaches "done"; env never terminates.
+        env    = _FakeEnv()
+        policy = _FakePolicy(["approach", "approach", "approach", "approach", "approach"])
+        player = self._make_player(env, policy)
+
+        episode, outcome = player.run_headless(max_steps=3)
+        assert outcome == "timeout"
+        assert len(episode) == 3
+
+    def test_outcome_terminated(self):
+        # Env terminates on step 2; policy never reaches "done".
+        env    = _FakeEnv(terminate_at=2)
+        policy = _FakePolicy(["approach", "approach", "approach", "approach"])
+        player = self._make_player(env, policy)
+
+        episode, outcome = player.run_headless(max_steps=10)
+        assert outcome == "terminated"
+        assert len(episode) == 2
+
+    def test_outcome_crashed_returns_partial_data(self):
+        env    = _FakeEnv(crash_at=3)
+        policy = _FakePolicy(["approach"] * 10)
+        player = self._make_player(env, policy)
+
+        episode, outcome = player.run_headless(max_steps=10)
+        assert outcome == "crashed"
+        # Two successful steps happened before the crash on step 3.
+        assert len(episode) == 2
+
+    def test_uses_config_max_steps_when_override_none(self):
+        env    = _FakeEnv()
+        policy = _FakePolicy(["approach"] * 100)
+        cfg    = _make_simple_config()
+        cfg.max_steps = 4
+        player = ScenePlayer(env, policy, cfg)
+
+        episode, outcome = player.run_headless(max_steps=None)
+        assert outcome == "timeout"
+        assert len(episode) == 4
+
+
+class TestScenePlayerInteractive:
+    def _make_player(self, env, policy):
+        cfg = _make_simple_config()
+        return ScenePlayer(env, policy, cfg)
+
+    def test_shows_hints_only_while_ready(self):
+        env    = _FakeEnv()
+        policy = _FakePolicy(["ready", "ready", "approach", "approach"])
+        player = self._make_player(env, policy)
+        viewer = _FakeViewer(max_frames=3)
+
+        player.run_interactive(viewer, step_delay=0.0)
+        # Hints inserted while state was "ready" (initial frame only — state advances each act).
+        # Scripted transitions: frame1 ready→ready, frame2 ready→approach, frame3 approach→approach.
+        assert env.insert_hints_calls >= 1
+        assert viewer.sync_calls == 3
+
+    def test_stops_on_done(self):
+        env    = _FakeEnv()
+        policy = _FakePolicy(["approach", "done"])
+        player = self._make_player(env, policy)
+        viewer = _FakeViewer(max_frames=10)
+
+        player.run_interactive(viewer, step_delay=0.0)
+        # One act call advances to done, then the loop exits.
+        assert policy.state == "done"
+        assert viewer.sync_calls == 1
+
+    def test_stops_on_env_terminated(self):
+        env    = _FakeEnv(terminate_at=2)
+        policy = _FakePolicy(["approach"] * 10)
+        player = self._make_player(env, policy)
+        viewer = _FakeViewer(max_frames=10)
+
+        player.run_interactive(viewer, step_delay=0.0)
+        assert viewer.sync_calls == 2

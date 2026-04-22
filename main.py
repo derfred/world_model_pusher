@@ -15,10 +15,7 @@ import sys
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent / "src"))
 
-from src.world_model_pusher.config import load_config, save_config, get_default_config
-from src.world_model_pusher.data.tfrecord_utils import TFRecordReader
-from src.world_model_pusher.models.mlx_models import WorldModelEncoder
-from src.world_model_pusher.training.trainer import Trainer, create_optimizer, create_data_loader
+from src.world_model_pusher.config import load_config
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +62,11 @@ def _parse_render_size(render_size: str) -> tuple[int, int]:
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
 @click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
 @click.option("--seed", default=None, type=int, help="Random seed")
+@click.option("--max-steps", default=None, type=int, help="Per-episode step cap (overrides scene config)")
+@click.option("--format", "fmt", default=None, type=click.Choice(["hdf5", "rerun"]),
+              help="Episode output format (hdf5 or rerun)")
 @click.pass_context
-def generate_scenes(ctx, episodes, output, difficulty, render_size, seed):
+def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_steps, fmt):
   """Generate pushing scenes using a random push policy."""
   from dataclasses import asdict
   from tqdm import tqdm
@@ -74,9 +74,10 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed):
   from src.world_model_pusher.sim import (
     EpisodeWriter,
     PushingEnv,
+    RandomPushPolicy,
     SceneBuilder,
     SceneGenerator,
-    random_push_policy,
+    ScenePlayer,
   )
 
   cfg = _resolve_sim_cfg(ctx, {
@@ -84,61 +85,67 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed):
     "difficulty": difficulty,
     "render_size": render_size,
     "seed": seed,
+    "format": fmt,
   })
   output             = cfg["output_dir"]
   difficulty         = cfg["difficulty"]
   resolved_seed      = _resolve_seed(cfg, seed)
   render_h, render_w = _parse_render_size(cfg["render_size"])
+  fmt                = cfg.get("format", "hdf5")
 
   builder   = SceneBuilder()
   env       = PushingEnv(builder, render_size=(render_h, render_w))
   generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
-  writer    = EpisodeWriter(output, format="hdf5")
+  writer    = EpisodeWriter(output, format=fmt)
   rng       = np.random.default_rng(resolved_seed)
 
-  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={difficulty}, seed={resolved_seed})")
-  total_reward = 0.0
+  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={difficulty}, format={fmt}, seed={resolved_seed})")
+  outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
-    config       = generator.sample(rng)
-    obs, _       = env.reset(config=config)
-    episode_data = []
-    done         = False
+    config = generator.sample(rng)
+    policy = RandomPushPolicy(config, env.controller, rng)
+    player = ScenePlayer(env, policy, config)
 
-    while not done:
-      action = random_push_policy(obs, config, rng)
-      next_obs, reward, terminated, truncated, info = env.step(action)
-      episode_data.append({
-        "pre_image": obs["image"],
-        "post_image": next_obs["image"],
-        "action": action,
-        "reward": reward,
-      })
-      total_reward += reward
-      done = terminated or truncated
-      obs = next_obs
+    episode_data, outcome = player.run_headless(max_steps=max_steps)
+    outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+
+    if not episode_data:
+      click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
+      continue
 
     writer.write_episode(
       episode_data,
-      metadata={"config": asdict(config), "seed": resolved_seed + ep_idx, "source": "sim"},
+      metadata={
+        "config":  asdict(config),
+        "seed":    resolved_seed + ep_idx,
+        "source":  "sim",
+        "outcome": outcome,
+        "goal_xy": config.goal_pos,
+      },
     )
 
   env.close()
-  click.echo(f"Done. Avg reward per step: {total_reward / max(1, episodes):.4f}")
+  click.echo(f"Done. Outcomes: {outcome_counts}")
 
 @cli.command("show-scene")
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
-@click.option("--step-delay", default=0.5, type=float, help="Seconds to sleep between steps (default 0.05)")
+@click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
 @click.pass_context
 def show_scene(ctx, difficulty, seed, render_size, step_delay):
   """Generate a scene and run it in the interactive MuJoCo viewer."""
-  import time
   import mujoco
   import mujoco.viewer
 
-  from src.world_model_pusher.sim import PushingEnv, SceneBuilder, SceneGenerator, RandomPushPolicy
+  from src.world_model_pusher.sim import (
+    PushingEnv,
+    RandomPushPolicy,
+    SceneBuilder,
+    SceneGenerator,
+    ScenePlayer,
+  )
 
   cfg = _resolve_sim_cfg(ctx, {"difficulty": difficulty, "seed": seed, "render_size": render_size})
   difficulty         = cfg["difficulty"]
@@ -153,7 +160,9 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   click.echo(f"difficulty={difficulty}  seed={resolved_seed}")
   config = generator.sample(rng)
   policy = RandomPushPolicy(config, env.controller, rng)
-  obs, _ = env.reset(config=config)
+  player = ScenePlayer(env, policy, config)
+
+  env.reset(config=config)
 
   def key_callback(keycode):
     if keycode == 32 and policy.state == "ready":  # Space bar to start the push
@@ -163,18 +172,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   click.echo("Launching MuJoCo viewer — close the window to exit.")
   with mujoco.viewer.launch_passive(env.model, env.data, key_callback=key_callback) as v:
-    while v.is_running():
-      action, prev_state = policy.act(obs)
-      if prev_state is not None:
-        print(f"Policy state changed: {prev_state} → {policy.state}")
-      obs, _, terminated, truncated, _ = env.step(action)
-
-      v.user_scn.ngeom = 0
-      if policy.state == "ready":
-        env.insert_hints(v, policy)
-
-      v.sync()
-      time.sleep(step_delay)
+    player.run_interactive(v, step_delay)
 
   env.close()
 

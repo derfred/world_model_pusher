@@ -145,6 +145,8 @@ def _inject_arm_fragment(root: etree._Element, arm_root: etree._Element) -> None
     arm_worldbody = arm_root.find("worldbody")
     if arm_worldbody is not None:
         base_worldbody = root.find("worldbody")
+        if base_worldbody is None:
+            base_worldbody = etree.SubElement(root, "worldbody")
         for child in arm_worldbody:
             base_worldbody.append(child)
 

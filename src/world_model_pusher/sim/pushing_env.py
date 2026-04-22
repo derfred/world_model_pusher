@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import gymnasium as gym
 import mujoco  # type: ignore[import-untyped]
@@ -12,7 +12,7 @@ from gymnasium import spaces
 from .scene_builder import SceneBuilder
 from .scene_config import SceneConfig
 
-Observation = dict[str, np.ndarray]
+Observation = dict[str, Any]
 
 
 class Controller:
@@ -36,10 +36,15 @@ class Controller:
     self.arm_ctrl_range = model.actuator_ctrlrange[self.arm_ctrl_idx].copy()  # (n_joints, 2)
 
   def get_ee_pos(self, data) -> np.ndarray:
-    return data.site_xpos[self.ee_sid].copy().astype(np.float32)
+    return cast(np.ndarray, data.site_xpos[self.ee_sid].copy().astype(np.float32))
+
+  def get_ee_quat(self, data) -> np.ndarray:
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat, data.site_xmat[self.ee_sid])
+    return cast(np.ndarray, quat.astype(np.float32))
 
   def get_arm_qpos(self, data) -> np.ndarray:
-    return data.qpos[self.arm_qpos_adr].copy().astype(np.float32)
+    return cast(np.ndarray, data.qpos[self.arm_qpos_adr].copy().astype(np.float32))
 
   def reset_initial_qpos(self, data, qpos) -> None:
     """Set arm joint positions and matching control setpoints so the
@@ -56,25 +61,37 @@ class Controller:
     q = qpos[self.arm_qpos_adr].copy()
 
     lam_sq    = 0.05 ** 2
+    max_dq    = 0.3  # radians per iteration, cap to prevent runaway
     _jac_pos  = np.zeros((3, self.model.nv))
     _eye3     = np.eye(3)
     converged = False
+    err = np.array([np.inf, np.inf, np.inf])
+
     for _ in range(20):
-      mujoco.mj_forward(self.model, d)
-      err = target_xyz - d.site_xpos[self.ee_sid]
-      if np.linalg.norm(err) < 1e-3:
-        converged = True
-        break
-      mujoco.mj_jacSite(self.model, d, _jac_pos, None, self.ee_sid)
-      J = _jac_pos[:, self.arm_dof_idx]
-      dq = J.T @ np.linalg.solve(J @ J.T + lam_sq * _eye3, err)
-      q = q + dq
-      d.qpos[self.arm_qpos_adr] = q
+        mujoco.mj_forward(self.model, d)
+        ee = d.site_xpos[self.ee_sid]
+        if not np.all(np.isfinite(ee)):
+            raise RuntimeError(f"IK diverged (non-finite EE pos), last q={q}")
+        err = target_xyz - ee
+        if np.linalg.norm(err) < 1e-3:
+            converged = True
+            break
+        mujoco.mj_jacSite(self.model, d, _jac_pos, None, self.ee_sid)
+        J = _jac_pos[:, self.arm_dof_idx]
+        dq = J.T @ np.linalg.solve(J @ J.T + lam_sq * _eye3, err)
+
+        # Cap step size — the big win against runaway.
+        dq_norm = np.linalg.norm(dq)
+        if dq_norm > max_dq:
+            dq *= max_dq / dq_norm
+
+        q = q + dq
+        d.qpos[self.arm_qpos_adr] = q
 
     if not converged:
-      raise RuntimeError(f"IK did not converge: {err}")
+        raise RuntimeError(f"IK did not converge: err={err}, ||err||={np.linalg.norm(err):.4f}")
 
-    return q
+    return cast(np.ndarray, q)
 
   def update_arm(self, data, action):
     ctrl = np.clip(
@@ -117,8 +134,8 @@ class PushingEnv(gym.Env):
                 low=0, high=255, shape=(H, W, 3), dtype=np.uint8),
             "ee_pos": spaces.Box(
                 low=-2.0, high=2.0, shape=(3,), dtype=np.float32),
-            "ee_angle": spaces.Box(
-                low=-np.pi, high=np.pi, shape=(3,), dtype=np.float32),
+            "ee_quat": spaces.Box(
+                low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
             "object_pos": spaces.Box(
                 low=-2.0, high=2.0, shape=(2,), dtype=np.float32),
         })
@@ -245,17 +262,19 @@ class PushingEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _get_obs(self) -> Observation:
-        assert self.renderer is not None and self.data is not None
+        assert self.renderer is not None and self.data is not None and self.config is not None
         self.renderer.update_scene(self.data)
         image = self.renderer.render()
         return {
             "image": image,
             "ee_pos": self.controller.get_ee_pos(self.data),
+            "ee_quat": self.controller.get_ee_quat(self.data),
             "arm_qpos": self.controller.get_arm_qpos(self.data),
             "object_xy": self._get_object_pos(),
             "goal_xy": np.array(self.config.goal_pos, dtype=np.float32),
             "qpos": self.data.qpos.copy(),
             "step": self.step_count,
+            "time": float(self.data.time),
         }
 
     def _compute_reward(self) -> float:
