@@ -14,10 +14,14 @@ count is T+1 for T-1 actions, preserving the buffer's invariant.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol, Union
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
+
+
+ProgressCallback = Callable[[int, int, Path], None]
+Progress = Union[bool, ProgressCallback]
 
 
 RawEpisode = dict[str, np.ndarray]
@@ -196,14 +200,49 @@ def load_rerun_episode(path: str | Path) -> RawEpisode:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_progress(progress: Progress) -> ProgressCallback | None:
+  """Turn a ``Progress`` value into a per-file callback (or None)."""
+  if progress is False:
+    return None
+  if callable(progress):
+    return progress
+
+  try:
+    from tqdm import tqdm  # type: ignore[import-not-found]
+  except ImportError:
+    def _print_cb(i: int, total: int, path: Path) -> None:
+      print(f"[{i}/{total}] {path.name}")
+
+    return _print_cb
+
+  bar: dict[str, Any] = {"tqdm": None}
+
+  def _tqdm_cb(i: int, total: int, path: Path) -> None:
+    if bar["tqdm"] is None:
+      bar["tqdm"] = tqdm(total=total, unit="ep", desc="episodes")
+    bar["tqdm"].set_postfix_str(path.name, refresh=False)
+    bar["tqdm"].update(1)
+    if i == total:
+      bar["tqdm"].close()
+
+  return _tqdm_cb
+
+
 def iter_episodes(
   directory: str | Path,
   format: str = "hdf5",
+  progress: Progress = False,
 ) -> Iterator[RawEpisode]:
   """Yield raw episodes from a directory of writer output.
 
   ``format`` is one of ``"hdf5"`` or ``"rerun"`` and must match the
   writer used to produce the files.
+
+  ``progress`` controls optional progress reporting:
+    - ``False`` (default): silent
+    - ``True``: use ``tqdm`` if installed, else print one line per file
+    - a callable ``(i, total, path) -> None`` invoked after each episode
+      is loaded (``i`` is 1-based; ``i == total`` on the final call)
   """
   directory = Path(directory)
   if format == "hdf5":
@@ -215,5 +254,10 @@ def iter_episodes(
   else:
     raise ValueError(f"unsupported format {format!r}; use 'hdf5' or 'rerun'")
 
-  for p in paths:
-    yield loader(p)
+  callback = _resolve_progress(progress)
+  total = len(paths)
+  for i, p in enumerate(paths, start=1):
+    episode = loader(p)
+    if callback is not None:
+      callback(i, total, p)
+    yield episode

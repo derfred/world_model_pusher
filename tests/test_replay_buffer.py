@@ -152,7 +152,7 @@ def test_short_episode_dropped_on_finalize():
 
 
 def test_add_without_start_raises():
-  buf = ReplayBuffer()
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=1, seed=0)
   with pytest.raises(RuntimeError):
     buf.add(
       np.zeros((2,), dtype=np.float32),

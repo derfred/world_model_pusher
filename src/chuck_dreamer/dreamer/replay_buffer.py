@@ -14,7 +14,7 @@ import mlx.core as mx
 import numpy as np
 
 if TYPE_CHECKING:
-  from .episode_loader import EpisodeProcessor
+  from .episode_loader import EpisodeProcessor, Progress
 
 
 Episode = dict[str, np.ndarray]
@@ -30,13 +30,13 @@ class ReplayBuffer:
 
   def __init__(
     self,
-    capacity_steps: int = 1_000_000,
-    min_episode_len: int = 50,
+    capacity_steps: int,
+    min_episode_len: int,
     seed: int | None = None,
   ) -> None:
     if min_episode_len < 1:
       raise ValueError("min_episode_len must be >= 1")
-    self.capacity_steps = capacity_steps
+    self.capacity_steps  = capacity_steps
     self.min_episode_len = min_episode_len
 
     self._episodes: deque[Episode] = deque()
@@ -228,6 +228,7 @@ class ReplayBuffer:
     directory: str | Path,
     format: str = "hdf5",
     processor: EpisodeProcessor | None = None,
+    progress: "Progress" = False,
   ) -> int:
     """Ingest episodes from a sim ``EpisodeWriter`` output directory.
 
@@ -236,12 +237,16 @@ class ReplayBuffer:
     ``StateVectorProcessor`` (low-dim state obs). Returns the number
     of episodes successfully inserted (short episodes that fail the
     ``min_episode_len`` check are skipped, like ``add_episode``).
+
+    ``progress`` is forwarded to :func:`iter_episodes` — pass ``True``
+    for a tqdm/print progress bar or a ``(i, total, path)`` callable
+    for custom reporting.
     """
     from .episode_loader import StateVectorProcessor, iter_episodes
 
     proc = processor if processor is not None else StateVectorProcessor()
     count = 0
-    for raw in iter_episodes(directory, format=format):
+    for raw in iter_episodes(directory, format=format, progress=progress):
       episode = proc(raw)
       before = self.num_episodes
       self.add_episode(episode)

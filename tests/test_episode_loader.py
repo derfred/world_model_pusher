@@ -222,3 +222,56 @@ def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
   inserted = buf.load_sim_episodes(tmp_path, format="hdf5")
   assert inserted == 0
   assert buf.num_episodes == 0
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting
+# ---------------------------------------------------------------------------
+
+
+def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
+  for _ in range(3):
+    _write_sim_episode(tmp_path, "hdf5", T=10)
+
+  calls: list[tuple[int, int, str]] = []
+
+  def cb(i, total, path):
+    calls.append((i, total, path.name))
+
+  list(iter_episodes(tmp_path, format="hdf5", progress=cb))
+
+  assert [i for i, _, _ in calls] == [1, 2, 3]
+  assert all(total == 3 for _, total, _ in calls)
+  assert [name for _, _, name in calls] == [
+    "episode_00000.hdf5",
+    "episode_00001.hdf5",
+    "episode_00002.hdf5",
+  ]
+
+
+def test_iter_episodes_progress_callback_is_not_called_for_empty_dir(tmp_path):
+  calls: list[tuple[int, int, Path]] = []
+  list(iter_episodes(tmp_path, format="hdf5", progress=lambda *a: calls.append(a)))
+  assert calls == []
+
+
+def test_load_sim_episodes_forwards_progress(tmp_path):
+  for _ in range(2):
+    _write_sim_episode(tmp_path, "hdf5", T=10)
+
+  seen: list[int] = []
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.load_sim_episodes(
+    tmp_path,
+    format="hdf5",
+    progress=lambda i, total, path: seen.append(i),
+  )
+  assert seen == [1, 2]
+
+
+def test_iter_episodes_progress_true_does_not_crash(tmp_path, capsys):
+  # progress=True should work whether or not tqdm is installed: we only
+  # assert that no exception escapes and something gets reported.
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  eps = list(iter_episodes(tmp_path, format="hdf5", progress=True))
+  assert len(eps) == 1

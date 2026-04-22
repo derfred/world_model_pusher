@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
+import mujoco  # type: ignore[import-untyped]
 import h5py  # type: ignore[import-untyped]
 import numpy as np
 
 from .scene_config import SceneConfig
+from ..policy import Policy, Action
 
 logger = logging.getLogger(__name__)
 
@@ -227,229 +228,189 @@ class RerunEpisodeWriter:
 # Random push policy
 # ---------------------------------------------------------------------------
 
-class RandomPushPolicy:
-    """
-        A simple heuristic push policy.
+class RandomPushPolicy(Policy):
+  """
+      A simple heuristic push policy.
 
-        State 1 - initial: arm in rest position pointing to the middle of the table
-        State 2 — approach: move the end-effector toward the object, maintain a standoff distance.
-        State 3 — push: once close, move toward the goal.
-        State 4 — done: push complete, hold position.
+      State 1 - initial: arm in rest position pointing to the middle of the table
+      State 2 — approach: move the end-effector toward the object, maintain a standoff distance.
+      State 3 — push: once close, move toward the goal.
+      State 4 — done: push complete, hold position.
 
-        Returns a (3,) float32 action [dx, dy, dz].
-    """
+      Returns a (3,) float32 action [dx, dy, dz].
+  """
 
-    _PUSH_Z = 0.075          # EE height — midpoint of typical object side
-    _MOVE_SPEED = 0.015
-    _LOOKAHEAD  = 0.02   # meters ahead of projected position to command
-    _STANDOFF = 0.06         # approach to this distance behind the object
-    _CLOSE_THRESH = 0.08      # switch from approach to push phase
+  _PUSH_Z = 0.075          # EE height — midpoint of typical object side
+  _MOVE_SPEED = 0.015
+  _LOOKAHEAD  = 0.02   # meters ahead of projected position to command
+  _STANDOFF = 0.06         # approach to this distance behind the object
+  _CLOSE_THRESH = 0.08      # switch from approach to push phase
 
-    state: str = "initial"  # "initial", "ready", "approach", "push", "done"
+  state: str = "initial"  # "initial", "ready", "approach", "push", "done"
 
-    def __init__(self, config: SceneConfig, controller, rng: np.random.Generator | None = None) -> None:
-        self.config     = config
-        self.controller = controller
-        self.rng        = rng if rng is not None else np.random.default_rng()
-        self.start_xyz: np.ndarray | None = None
+  def __init__(self, controller) -> None:
+    self.controller = controller
+    self.start_xyz: np.ndarray | None = None
 
-    @property
-    def ready_xy(self) -> np.ndarray:
-        base  = np.array(self.config.robot_base_pos[:2], dtype=np.float64)
-        zero  = np.array([0.0, 0.0], dtype=np.float64)
-        return cast(np.ndarray, base + (zero - base) * 0.3)
+  @property
+  def ready_xy(self) -> np.ndarray:
+    base  = np.array(self.scene.robot_base_pos[:2], dtype=np.float64)
+    zero  = np.array([0.0, 0.0], dtype=np.float64)
+    return cast(np.ndarray, base + (zero - base) * 0.3)
 
-    @property
-    def goal_xy(self) -> np.ndarray:
-        return np.array(self.config.goal_pos, dtype=np.float64)
+  @property
+  def goal_xy(self) -> np.ndarray:
+    return np.array(self.scene.goal_pos, dtype=np.float64)
 
-    @property
-    def goal_xyz(self) -> np.ndarray:
-        return cast(np.ndarray, np.append(self.goal_xy, self._PUSH_Z))
+  @property
+  def goal_xyz(self) -> np.ndarray:
+    return cast(np.ndarray, np.append(self.goal_xy, self._PUSH_Z))
 
-    @property
-    def object_xy(self) -> np.ndarray:
-        return np.array(self.config.target.pos[:2], dtype=np.float64)
+  @property
+  def object_xy(self) -> np.ndarray:
+    return np.array(self.scene.target.pos[:2], dtype=np.float64)
 
-    @property
-    def approach_xy(self) -> np.ndarray:
-        push_dir  = self.goal_xy - self.object_xy
-        push_dist = np.linalg.norm(push_dir)
-        if push_dist > 1e-6:
-            push_dir /= push_dist
-        else:
-            push_dir = np.array([1.0, 0.0])
-        approach_point = self.object_xy - push_dir * self._STANDOFF
-        return cast(np.ndarray, approach_point)
+  @property
+  def approach_xy(self) -> np.ndarray:
+    push_dir  = self.goal_xy - self.object_xy
+    push_dist = np.linalg.norm(push_dir)
+    if push_dist > 1e-6:
+      push_dir /= push_dist
+    else:
+      push_dir = np.array([1.0, 0.0])
+    approach_point = self.object_xy - push_dir * self._STANDOFF
+    return cast(np.ndarray, approach_point)
 
-    @property
-    def approach_xyz(self) -> np.ndarray:
-        return cast(np.ndarray, np.append(self.approach_xy, self._PUSH_Z))
+  @property
+  def approach_xyz(self) -> np.ndarray:
+    return cast(np.ndarray, np.append(self.approach_xy, self._PUSH_Z))
 
-    def _determine_state(self, obs: dict[str, np.ndarray]) -> str | None:
-        if self.state == "initial":
-            if np.linalg.norm(obs["ee_pos"][:2] - self.ready_xy) < self._CLOSE_THRESH:
-                return "ready"
-        elif self.state == "approach":
-            if np.linalg.norm(obs["ee_pos"] - self.approach_xyz) < self._CLOSE_THRESH:
-                return "push"
-        elif self.state == "push":
-            if np.linalg.norm(obs["ee_pos"] - self.goal_xyz) < self._CLOSE_THRESH:
-                return "done"
-        return None
+  def _determine_state(self, obs: dict[str, np.ndarray]) -> str | None:
+      if self.state == "initial":
+          if np.linalg.norm(obs["ee_pos"][:2] - self.ready_xy) < self._CLOSE_THRESH:
+              return "ready"
+      elif self.state == "approach":
+          if np.linalg.norm(obs["ee_pos"] - self.approach_xyz) < self._CLOSE_THRESH:
+              return "push"
+      elif self.state == "push":
+          if np.linalg.norm(obs["ee_pos"] - self.goal_xyz) < self._CLOSE_THRESH:
+              return "done"
+      return None
 
-    def _step_to(
-        self,
-        start_xyz: np.ndarray,
-        target_xyz: np.ndarray,
-        obs: dict[str, np.ndarray],
-    ) -> np.ndarray:
-        if self.start_xyz is None:
-            self.start_xyz = np.asarray(start_xyz, dtype=np.float64).copy()
+  def _step_to(
+      self,
+      start_xyz: np.ndarray,
+      target_xyz: np.ndarray,
+      obs: dict[str, np.ndarray],
+  ) -> Action:
+    if self.start_xyz is None:
+      self.start_xyz = np.asarray(start_xyz, dtype=np.float64).copy()
 
-        start  = self.start_xyz
-        end    = np.asarray(target_xyz, dtype=np.float64)
-        ee     = np.asarray(obs["ee_pos"], dtype=np.float64)
+    start = self.start_xyz
+    end   = np.asarray(target_xyz, dtype=np.float64)
+    ee    = np.asarray(obs["ee_pos"], dtype=np.float64)
 
-        # Direction and total length of the segment.
-        segment = end - start
-        seg_len = float(np.linalg.norm(segment))
-        if seg_len < 1e-6:
-            return cast(np.ndarray, self.controller.ik_for_ee_pos(end, obs["qpos"]))
-        direction = segment / seg_len
+    # Direction and total length of the segment.
+    segment = end - start
+    seg_len = float(np.linalg.norm(segment))
+    if seg_len < 1e-6:
+        return Action.from_qpos(self.controller.ik_for_ee_pos(end, obs["qpos"]))
+    direction = segment / seg_len
 
-        # Project current EE position onto the segment to find actual progress.
-        # This is what makes it robust: if the EE lagged behind or got pushed
-        # sideways by contact, we re-reference from where we actually are.
-        progress = float(np.dot(ee - start, direction))
-        progress = float(np.clip(progress, 0.0, seg_len))
+    # Project current EE position onto the segment to find actual progress.
+    # This is what makes it robust: if the EE lagged behind or got pushed
+    # sideways by contact, we re-reference from where we actually are.
+    progress = float(np.dot(ee - start, direction))
+    progress = float(np.clip(progress, 0.0, seg_len))
 
-        # Command a point a small lookahead past the projection, capped at the end.
-        # Lookahead > step size gives the controller something to chase and
-        # smooths out jitter from the projection.
-        commanded_progress = min(progress + self._LOOKAHEAD, seg_len)
-        commanded = start + direction * commanded_progress
+    # Command a point a small lookahead past the projection, capped at the end.
+    # Lookahead > step size gives the controller something to chase and
+    # smooths out jitter from the projection.
+    commanded_progress = min(progress + self._LOOKAHEAD, seg_len)
+    commanded = start + direction * commanded_progress
 
-        return cast(np.ndarray, self.controller.ik_for_ee_pos(commanded, obs["qpos"]))
+    return Action.from_qpos(self.controller.ik_for_ee_pos(commanded, obs["qpos"]))
 
-    def _act_initial(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        target = np.append(self.ready_xy, self._PUSH_Z)
-        return self._step_to(obs["ee_pos"], target, obs)
+  def _act_initial(self, obs: dict[str, np.ndarray]) -> Action:
+    target = np.append(self.ready_xy, self._PUSH_Z)
+    return self._step_to(obs["ee_pos"], target, obs)
 
-    def _act_ready(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return obs["arm_qpos"]
+  def _act_ready(self, obs: dict[str, np.ndarray]) -> Action:
+    return Action.from_qpos(obs["arm_qpos"])
 
-    def _act_approach(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return self._step_to(obs["ee_pos"], self.approach_xyz, obs)
+  def _act_approach(self, obs: dict[str, np.ndarray]) -> Action:
+    return self._step_to(obs["ee_pos"], self.approach_xyz, obs)
 
-    def _act_push(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return self._step_to(self.approach_xyz, self.goal_xyz, obs)
+  def _act_push(self, obs: dict[str, np.ndarray]) -> Action:
+    return self._step_to(self.approach_xyz, self.goal_xyz, obs)
 
-    def _act_done(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return obs["arm_qpos"]
+  def _act_done(self, obs: dict[str, np.ndarray]) -> Action:
+    return Action.from_qpos(obs["arm_qpos"])
 
-    def act(self, obs: dict[str, np.ndarray]) -> tuple[np.ndarray, str | None]:
-        cur_state  = self.state
-        next_state = self._determine_state(obs)
-        changed    = next_state is not None and next_state != cur_state
-        if changed:
-            assert next_state is not None
-            self.start_xyz = None
-            self.state     = next_state
+  def reset(self, scene: SceneConfig) -> None:
+    self.scene     = scene
+    self.state     = "initial"
+    self.start_xyz = None
 
-        action = getattr(self, f"_act_{self.state}")(obs)
-        return action, (cur_state if changed else None)
+  def act(self, obs: dict[str, np.ndarray]) -> tuple[Action, str | None]:
+    cur_state  = self.state
+    next_state = self._determine_state(obs)
+    changed    = next_state is not None and next_state != cur_state
+    if changed:
+      assert next_state is not None
+      self.start_xyz = None
+      self.state     = next_state
 
+    action = getattr(self, f"_act_{self.state}")(obs)
+    return action, (cur_state if changed else None)
 
-# ---------------------------------------------------------------------------
-# ScenePlayer: shared episode-stepping logic for interactive and headless use
-# ---------------------------------------------------------------------------
+  def is_done(self) -> bool:
+    return self.state == "done"
 
-class ScenePlayer:
-    """
-    Drives a PushingEnv with a RandomPushPolicy.
+  def insert_hints(self, viewer: mujoco.Viewer, rgba: np.ndarray = np.array([0.0, 1.0, 0.0, 0.8], dtype=np.float32)) -> None:
+    """Insert custom geoms into the scene for visualization hints."""
+    if self.state != "ready":
+      return
 
-    Shared logic between the interactive viewer (show-scene) and the
-    headless episode collector (generate-scenes).
-    """
+    if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+      return
 
-    def __init__(self, env, policy: "RandomPushPolicy", config: SceneConfig) -> None:
-        self.env    = env
-        self.policy = policy
-        self.config = config
+    assert self.scene is not None
 
-    def _step_once(self, obs: dict[str, np.ndarray]) -> tuple[dict[str, Any], dict[str, np.ndarray], bool, bool, str | None]:
-        action, prev_state = self.policy.act(obs)
-        next_obs, reward, terminated, truncated, _ = self.env.step(action)
-        step = {
-            "image":      obs["image"],
-            "action":     np.asarray(action, dtype=np.float32),
-            "reward":     float(reward),
-            "timestamp":  float(next_obs["time"]),
-            "joint_qpos": np.asarray(next_obs["arm_qpos"], dtype=np.float32),
-            "ee_pos":     np.asarray(next_obs["ee_pos"],   dtype=np.float32),
-            "ee_quat":    np.asarray(next_obs["ee_quat"],  dtype=np.float32),
-            "object_xy":  np.asarray(next_obs["object_xy"], dtype=np.float32),
-        }
-        return step, next_obs, bool(terminated), bool(truncated), prev_state
+    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+    mujoco.mjv_initGeom(
+      g,
+      type=mujoco.mjtGeom.mjGEOM_SPHERE,
+      size=np.array([0.02, 0.0, 0.0], dtype=np.float64),
+      pos=self.goal_xyz,
+      mat=np.eye(3).flatten(),
+      rgba=rgba,
+    )
+    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+    viewer.user_scn.ngeom += 1
 
-    def run_interactive(self, viewer, step_delay: float) -> None:
-        """Drive the simulation via a MuJoCo passive viewer.
+    if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+      return
 
-        The env must already be reset before calling (the caller needs
-        ``env.model``/``env.data`` to construct the viewer). The caller
-        also owns any key_callback used to advance ``ready → approach``.
-        Hints are drawn while the policy is in state "ready".
-        """
-        obs = self.env._get_obs()
-        while viewer.is_running():
-            step, obs, terminated, truncated, prev_state = self._step_once(obs)
-            if prev_state is not None:
-                print(f"Policy state changed: {prev_state} → {self.policy.state}")
+    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+    mujoco.mjv_initGeom(
+      g,
+      type=mujoco.mjtGeom.mjGEOM_ARROW,
+      size=np.zeros(3),
+      pos=np.zeros(3),
+      mat=np.eye(3).flatten(),
+      rgba=rgba,
+    )
+    mujoco.mjv_connector(
+      g,
+      mujoco.mjtGeom.mjGEOM_ARROW,
+      0.01,
+      self.approach_xyz,
+      self.goal_xyz,
+    )
+    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+    viewer.user_scn.ngeom += 1
 
-            viewer.user_scn.ngeom = 0
-            if self.policy.state == "ready":
-                self.env.insert_hints(viewer, self.policy)
-
-            viewer.sync()
-            if step_delay > 0:
-                time.sleep(step_delay)
-
-            if terminated or truncated or self.policy.state == "done":
-                break
-
-    def run_headless(self, max_steps: int | None = None) -> tuple[list[dict[str, Any]], str]:
-        """Run until completion, robust to simulation crashes.
-
-        Auto-advances ``ready → approach`` (no manual step). Does not render
-        hints. Catches exceptions raised during ``policy.act`` or
-        ``env.step`` (e.g. IK non-convergence) and returns the data
-        collected up to that point.
-
-        Returns ``(episode_data, outcome)`` where outcome is one of:
-          - "done":       policy reached its done state
-          - "terminated": env signaled terminated/truncated
-          - "timeout":    ``max_steps`` reached
-          - "crashed":    an exception was raised during stepping
-        """
-        if max_steps is None:
-            max_steps = self.config.max_steps
-
-        episode: list[dict[str, Any]] = []
-        try:
-            obs, _ = self.env.reset(config=self.config)
-            for _ in range(max_steps):
-                if self.policy.state == "ready":
-                    self.policy.state = "approach"
-
-                step, obs, terminated, truncated, _ = self._step_once(obs)
-                episode.append(step)
-
-                if self.policy.state == "done":
-                    return episode, "done"
-                if terminated or truncated:
-                    return episode, "terminated"
-            return episode, "timeout"
-        except Exception as e:
-            logger.warning("Simulation crashed after %d steps: %s", len(episode), e)
-            return episode, "crashed"
+  def advance_from_ready(self) -> None:
+    if self.state == "ready":
+      self.state = "approach"

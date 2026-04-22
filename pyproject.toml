@@ -80,9 +80,12 @@ extend-ignore = ["E203", "W503"]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["mlx", "mlx.*"]
+module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "h5py", "rerun", "tqdm", "tqdm.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

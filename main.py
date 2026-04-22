@@ -27,10 +27,11 @@ def cli(ctx, config, verbose):
     """Chuck Dreamer CLI - Robotics ML with MLX."""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+
     # Load configuration
     ctx.ensure_object(dict)
     ctx.obj['config'] = load_config(config)
+
 
 def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
   """Merge the loaded config with a nested dict of CLI overrides, defaulting seed if unset."""
@@ -38,11 +39,6 @@ def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
   if cfg.get("seed") is None:
     cfg.seed = int(np.random.default_rng().integers(0, 2**31))
   return cfg
-
-def _render_hw(render_size: str) -> tuple[int, int]:
-  """Parse a 'WxH' string and return (render_h, render_w) as expected by PushingEnv."""
-  w, h = render_size.lower().split("x")
-  return int(h), int(w)
 
 
 @cli.command("generate-scenes")
@@ -64,8 +60,6 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
     EpisodeWriter,
     PushingEnv,
     RandomPushPolicy,
-    SceneBuilder,
-    SceneGenerator,
     ScenePlayer,
   )
 
@@ -76,24 +70,24 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
       "difficulty": difficulty,
       "render_size": render_size,
       "format": fmt,
+      "max_steps": max_steps,
     },
   })
-
-  builder   = SceneBuilder()
-  env       = PushingEnv(builder, render_size=_render_hw(cfg.sim.render_size))
-  generator = SceneGenerator(table_size=cfg.sim.table_size, difficulty=cfg.sim.difficulty)
-  writer    = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
-  rng       = np.random.default_rng(cfg.seed)
 
   click.echo(f"Collecting {episodes} episodes → {cfg.sim.output_dir}  (difficulty={cfg.sim.difficulty}, format={cfg.sim.format}, seed={cfg.seed})")
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
+  env    = PushingEnv(cfg)
+  policy = RandomPushPolicy(env.controller)
+  writer = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
-    config = generator.sample(rng)
-    policy = RandomPushPolicy(config, env.controller, rng)
-    player = ScenePlayer(env, policy, config)
+    scene  = env.generate_scene()
+    player = ScenePlayer(env, policy, scene)
 
-    episode_data, outcome = player.run_headless(max_steps=max_steps)
+    env.reset(scene=scene)
+    policy.reset(scene)
+
+    episode_data, outcome   = player.run_headless(max_steps=cfg.sim.max_steps)
     outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
     if not episode_data:
@@ -103,16 +97,17 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
     writer.write_episode(
       episode_data,
       metadata={
-        "config":  asdict(config),
+        "config":  asdict(scene),
         "seed":    cfg.seed + ep_idx,
         "source":  "sim",
         "outcome": outcome,
-        "goal_xy": config.goal_pos,
+        "goal_xy": scene.goal_pos,
       },
     )
 
   env.close()
   click.echo(f"Done. Outcomes: {outcome_counts}")
+
 
 @cli.command("show-scene")
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
@@ -128,9 +123,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   from chuck_dreamer.sim import (
     PushingEnv,
     RandomPushPolicy,
-    SceneBuilder,
-    SceneGenerator,
-    ScenePlayer,
+    ScenePlayer
   )
 
   cfg = _resolve_cfg(ctx, {
@@ -138,21 +131,18 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
     "sim": {"difficulty": difficulty, "render_size": render_size},
   })
 
-  builder   = SceneBuilder()
-  env       = PushingEnv(builder, render_size=_render_hw(cfg.sim.render_size))
-  generator = SceneGenerator(table_size=cfg.sim.table_size, difficulty=cfg.sim.difficulty)
-  rng       = np.random.default_rng(cfg.seed)
-
   click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
-  config = generator.sample(rng)
-  policy = RandomPushPolicy(config, env.controller, rng)
-  player = ScenePlayer(env, policy, config)
+  env    = PushingEnv(cfg)
+  scene  = env.generate_scene()
+  policy = RandomPushPolicy(env.controller)
+  player = ScenePlayer(env, policy, scene)
 
-  env.reset(config=config)
+  env.reset(scene=scene)
+  policy.reset(scene)
 
   def key_callback(keycode):
     if keycode == 32 and policy.state == "ready":  # Space bar to start the push
-      policy.state = "approach"
+      policy.advance_from_ready()
       print("Policy state changed: ready → approach")
     return True
 
@@ -164,12 +154,14 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
 
 @cli.command("train")
+@click.option("--warmup_path", default=None, type=str, help="Path to warmup episodes")
+@click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.pass_context
-def train(ctx):
+def train(ctx, warmup_path, seed):
   """Train a model using the specified configuration."""
-  from src.chuck_dreamer.trainer import Trainer
+  from chuck_dreamer.trainer import Trainer
 
-  cfg = _resolve_cfg(ctx, {})
+  cfg = _resolve_cfg(ctx, {"seed": seed, "data": {"warmup_path": warmup_path}})
   click.echo(f"Training with config: {cfg}")
   trainer = Trainer(cfg)
   trainer.train()

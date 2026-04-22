@@ -5,8 +5,8 @@ from .data_collection import (
     HDF5EpisodeWriter,
     RandomPushPolicy,
     RerunEpisodeWriter,
-    ScenePlayer,
 )
+from .scene_player import ScenePlayer
 from .pushing_env import PushingEnv
 from .scene_builder import SceneBuilder
 from .scene_config import (
