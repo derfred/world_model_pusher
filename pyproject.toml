@@ -5,8 +5,8 @@ description = "Robot Learning Group Project: Chuck Dreamer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    # MLX - Apple's ML framework
-    "mlx>=0.17.0",
+    # MLX - Apple's ML framework (Apple Silicon only)
+    "mlx>=0.17.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # TensorFlow for TFRecord support
     "tensorflow>=2.15.0",
     "tensorflow-datasets>=4.9.0",

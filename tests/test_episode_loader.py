@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from chuck_dreamer.dreamer import (
+pytest.importorskip("mlx.core")
+
+from chuck_dreamer.dreamer import (  # noqa: E402
   ImageProcessor,
   ReplayBuffer,
   StateVectorProcessor,
@@ -15,8 +17,8 @@ from chuck_dreamer.dreamer import (
   load_hdf5_episode,
   load_rerun_episode,
 )
-from chuck_dreamer.dreamer.episode_loader import _drop_last_and_pack
-from chuck_dreamer.sim.data_collection import EpisodeWriter
+from chuck_dreamer.dreamer.episode_loader import _drop_last_and_pack  # noqa: E402
+from chuck_dreamer.sim.data_collection import EpisodeWriter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

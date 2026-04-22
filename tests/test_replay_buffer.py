@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import mlx.core as mx
 import numpy as np
 import pytest
 
-from chuck_dreamer.dreamer import ReplayBuffer
+mx = pytest.importorskip("mlx.core")
+
+from chuck_dreamer.dreamer import ReplayBuffer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
