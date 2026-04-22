@@ -8,9 +8,11 @@ for training models, processing data, and running experiments.
 
 import click
 import logging
-import numpy as np
 
-from chuck_dreamer.config import load_config
+import numpy as np
+from omegaconf import DictConfig
+
+from chuck_dreamer.config import load_config, merge_overrides
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -30,25 +32,17 @@ def cli(ctx, config, verbose):
     ctx.ensure_object(dict)
     ctx.obj['config'] = load_config(config)
 
-def _resolve_sim_cfg(ctx, overrides: dict) -> dict:
-  """Merge config file sim section with CLI overrides (None values are skipped)."""
-  from omegaconf import OmegaConf
-  base = OmegaConf.to_container(ctx.obj["config"].sim, resolve=True)
-  merged = {k: v for k, v in overrides.items() if v is not None}
-  base.update(merged)
-  return base
+def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
+  """Merge the loaded config with a nested dict of CLI overrides, defaulting seed if unset."""
+  cfg = merge_overrides(ctx.obj["config"], overrides)
+  if cfg.get("seed") is None:
+    cfg.seed = int(np.random.default_rng().integers(0, 2**31))
+  return cfg
 
-def _resolve_seed(cfg: dict, cli_seed) -> int:
-  """Return the seed from cfg if the user passed one via CLI, else a fresh random seed."""
-  seed = cfg.get("seed") if cli_seed is not None else None
-  if seed is None:
-    seed = int(np.random.default_rng().integers(0, 2**31))
-  return seed
-
-def _parse_render_size(render_size: str) -> tuple[int, int]:
+def _render_hw(render_size: str) -> tuple[int, int]:
   """Parse a 'WxH' string and return (render_h, render_w) as expected by PushingEnv."""
-  w_str, h_str = render_size.lower().split("x")
-  return int(h_str), int(w_str)
+  w, h = render_size.lower().split("x")
+  return int(h), int(w)
 
 
 @cli.command("generate-scenes")
@@ -75,26 +69,23 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
     ScenePlayer,
   )
 
-  cfg = _resolve_sim_cfg(ctx, {
-    "output_dir": output,
-    "difficulty": difficulty,
-    "render_size": render_size,
+  cfg = _resolve_cfg(ctx, {
     "seed": seed,
-    "format": fmt,
+    "sim": {
+      "output_dir": output,
+      "difficulty": difficulty,
+      "render_size": render_size,
+      "format": fmt,
+    },
   })
-  output             = cfg["output_dir"]
-  difficulty         = cfg["difficulty"]
-  resolved_seed      = _resolve_seed(cfg, seed)
-  render_h, render_w = _parse_render_size(cfg["render_size"])
-  fmt                = cfg.get("format", "hdf5")
 
   builder   = SceneBuilder()
-  env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
-  writer    = EpisodeWriter(output, format=fmt)
-  rng       = np.random.default_rng(resolved_seed)
+  env       = PushingEnv(builder, render_size=_render_hw(cfg.sim.render_size))
+  generator = SceneGenerator(table_size=cfg.sim.table_size, difficulty=cfg.sim.difficulty)
+  writer    = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
+  rng       = np.random.default_rng(cfg.seed)
 
-  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={difficulty}, format={fmt}, seed={resolved_seed})")
+  click.echo(f"Collecting {episodes} episodes → {cfg.sim.output_dir}  (difficulty={cfg.sim.difficulty}, format={cfg.sim.format}, seed={cfg.seed})")
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
@@ -113,7 +104,7 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
       episode_data,
       metadata={
         "config":  asdict(config),
-        "seed":    resolved_seed + ep_idx,
+        "seed":    cfg.seed + ep_idx,
         "source":  "sim",
         "outcome": outcome,
         "goal_xy": config.goal_pos,
@@ -142,17 +133,17 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
     ScenePlayer,
   )
 
-  cfg = _resolve_sim_cfg(ctx, {"difficulty": difficulty, "seed": seed, "render_size": render_size})
-  difficulty         = cfg["difficulty"]
-  resolved_seed      = _resolve_seed(cfg, seed)
-  render_h, render_w = _parse_render_size(cfg["render_size"])
+  cfg = _resolve_cfg(ctx, {
+    "seed": seed,
+    "sim": {"difficulty": difficulty, "render_size": render_size},
+  })
 
   builder   = SceneBuilder()
-  env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
-  rng       = np.random.default_rng(resolved_seed)
+  env       = PushingEnv(builder, render_size=_render_hw(cfg.sim.render_size))
+  generator = SceneGenerator(table_size=cfg.sim.table_size, difficulty=cfg.sim.difficulty)
+  rng       = np.random.default_rng(cfg.seed)
 
-  click.echo(f"difficulty={difficulty}  seed={resolved_seed}")
+  click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
   config = generator.sample(rng)
   policy = RandomPushPolicy(config, env.controller, rng)
   player = ScenePlayer(env, policy, config)
@@ -170,6 +161,18 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
     player.run_interactive(v, step_delay)
 
   env.close()
+
+
+@cli.command("train")
+@click.pass_context
+def train(ctx):
+  """Train a model using the specified configuration."""
+  from src.chuck_dreamer.trainer import Trainer
+
+  cfg = _resolve_cfg(ctx, {})
+  click.echo(f"Training with config: {cfg}")
+  trainer = Trainer(cfg)
+  trainer.train()
 
 
 if __name__ == "__main__":

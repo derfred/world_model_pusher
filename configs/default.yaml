@@ -1,5 +1,7 @@
 # Default configuration for Chuck Dreamer
 
+seed: null  # Randomized at runtime if unset
+
 model:
   type: "world_model_encoder"
   observation_dim: 84

@@ -66,6 +66,37 @@ def merge_configs(
     return cast(DictConfig, OmegaConf.merge(base_config, override_config))
 
 
+def _drop_none(d: dict) -> dict:
+    """Recursively remove keys whose value is None from a nested dict."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            cleaned = _drop_none(v)
+            if cleaned:
+                out[k] = cleaned
+        elif v is not None:
+            out[k] = v
+    return out
+
+
+def merge_overrides(
+        base_config: DictConfig,
+        overrides: dict) -> DictConfig:
+    """
+    Merge a (possibly nested) dict of overrides into a config, skipping None leaves.
+
+    Args:
+        base_config: Base configuration (typically the full loaded config)
+        overrides: Nested dict of overrides (e.g. {"sim": {"seed": 42}});
+                   keys with None leaf values are ignored
+
+    Returns:
+        Merged configuration
+    """
+    clean = _drop_none(overrides)
+    return cast(DictConfig, OmegaConf.merge(base_config, OmegaConf.create(clean)))
+
+
 def validate_config(config: DictConfig) -> bool:
     """
     Validate configuration parameters.
