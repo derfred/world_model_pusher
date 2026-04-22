@@ -8,10 +8,13 @@ from __future__ import annotations
 import pickle
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 import numpy as np
+
+if TYPE_CHECKING:
+  from .episode_loader import EpisodeProcessor
 
 
 Episode = dict[str, np.ndarray]
@@ -224,7 +227,7 @@ class ReplayBuffer:
     self,
     directory: str | Path,
     format: str = "hdf5",
-    processor: "EpisodeProcessor | None" = None,
+    processor: EpisodeProcessor | None = None,
   ) -> int:
     """Ingest episodes from a sim ``EpisodeWriter`` output directory.
 
