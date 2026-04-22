@@ -10,6 +10,10 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 
+    env:
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
+
     steps:
       - uses: actions/checkout@v6
 
@@ -22,6 +26,11 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Install system dependencies for MuJoCo offscreen rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libosmesa6 libosmesa6-dev libgl1-mesa-glx libglfw3
 
       - name: Install dependencies
         run: uv sync --group dev
