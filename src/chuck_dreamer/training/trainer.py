@@ -10,8 +10,8 @@ import time
 from tqdm import tqdm  # type: ignore[import-untyped]
 import wandb
 
-from ..dreamer.mlx_models import WorldModelEncoder, mse_loss
-from ..data.tfrecord_utils import TFRecordReader
+from ..dreamer.mlx_models import WorldModelEncoder, mse_loss  # type: ignore[import-untyped]
+from ..data.tfrecord_utils import TFRecordReader  # type: ignore[import-untyped]
 from ..config import DictConfig
 
 logger = logging.getLogger(__name__)
