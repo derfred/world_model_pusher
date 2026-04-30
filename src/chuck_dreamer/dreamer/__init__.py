@@ -1,21 +1,18 @@
 """Model definitions and utilities."""
 
-from chuck_dreamer.training.episode_loader import (
-  EpisodeProcessor,
-  ImageProcessor,
-  StateVectorProcessor,
-  iter_episodes,
-  load_hdf5_episode,
-  load_rerun_episode,
-)
-from chuck_dreamer.training.replay_buffer import ReplayBuffer
+from .policy import DreamerPolicy
+
+from .mlx_model import DreamerMLXModel
+
+
+def build_model(config, obs_dim: int, action_dim: int):
+  if config.hardware.device == "mlx":
+    return DreamerMLXModel(config, obs_dim=obs_dim, action_dim=action_dim)
+  else:
+    raise ValueError(f"Unsupported library specified in config: {config.hardware.device}")
+
 
 __all__ = [
-  "ReplayBuffer",
-  "EpisodeProcessor",
-  "StateVectorProcessor",
-  "ImageProcessor",
-  "iter_episodes",
-  "load_hdf5_episode",
-  "load_rerun_episode",
+  "build_model",
+  "DreamerPolicy"
 ]

@@ -55,6 +55,7 @@ dependencies = [
     "lxml-stubs>=0.5.1",
     "types-tqdm>=4.67.3.20260408",
     "rerun-sdk>=0.31.3",
+    "trackio>=0.25.1",
 ]
 
 [build-system]

@@ -7,7 +7,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from chuck_dreamer.dreamer import ReplayBuffer  # noqa: E402
+from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

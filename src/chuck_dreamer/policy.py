@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
-from chuck_dreamer.sim.scene_config import SceneConfig
+if TYPE_CHECKING:
+  from chuck_dreamer.sim.scene_config import SceneConfig
 
 
 @dataclass
@@ -24,6 +25,6 @@ class Action:
 
 
 class Policy(Protocol):
-  def reset(self, controller: Any, scene: SceneConfig) -> None: ...
+  def reset(self, controller: Any, scene: "SceneConfig") -> None: ...
   def act(self, obs: dict[str, np.ndarray]) -> tuple[Action, str | None]: ...
   def is_done(self) -> bool: ...

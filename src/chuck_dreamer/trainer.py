@@ -1,12 +1,14 @@
 import logging
 import os
-import pickle
+from collections import defaultdict
 
-from chuck_dreamer.sim.scripted_policy import ScriptedPolicy
-from chuck_dreamer.sim.pushing_env import PushingEnv
-from chuck_dreamer.sim.scene_player import ScenePlayer
+from .sim.pushing_env import PushingEnv
+from .sim.scene_player import ScenePlayer
 
 from .training.replay_buffer import ReplayBuffer
+from .training.tracker import Tracker
+
+from .dreamer import build_model, DreamerPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +22,11 @@ class Trainer:
       seed=config.seed,
     )
     self.env    = PushingEnv(config)
-    self.policy = ScriptedPolicy()
+    self.model  = build_model(config, obs_dim=15, action_dim=6)
+    self.policy = DreamerPolicy(self.model)
     self.player = ScenePlayer(config, self.env, self.policy)
+    self.tracker = Tracker(config)
+    self.tracker.init()
 
   def _warmup(self):
     if not os.path.exists(self.config.data.warmup_path):
@@ -31,15 +36,26 @@ class Trainer:
     self._replay_buffer.load_sim_episodes(self.config.data.warmup_path, self.config.data.warmup_format, progress=True)
 
   def _collect_phase(self):
+    collect_data = defaultdict(int)
     for _ in range(self.config.training.num_collect_episodes):
       self.player.reset()
       episode_data, outcome = self.player.run_headless(max_steps=self.config.sim.max_steps)
-      logger.info(f"Collected episode with outcome: {outcome}")
+      collect_data[outcome] += 1
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)
+    logger.info(f"Collect phase: collected {self.config.training.num_collect_episodes} episodes with outcomes: {dict(collect_data)}")
 
   def _train_phase(self):
-    pass
+    print("starting train phase with replay buffer size:", len(self._replay_buffer))
+    if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
+      logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
+      return
+
+    for epoch in range(self.config.training.num_gradient_steps):
+      batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
+
+      # get the world model predictions for this batch
+      self.model.wm_update(batch, tracker=self.tracker.derive({"phase": "train", "epoch": epoch}))
 
   def _eval_phase(self):
     pass

@@ -9,15 +9,15 @@ import pytest
 
 pytest.importorskip("mlx.core")
 
-from chuck_dreamer.dreamer import (  # noqa: E402
+from chuck_dreamer.training.episode_loader import (  # noqa: E402
   ImageProcessor,
-  ReplayBuffer,
   StateVectorProcessor,
+  _drop_last_and_pack,
   iter_episodes,
   load_hdf5_episode,
   load_rerun_episode,
 )
-from chuck_dreamer.training.episode_loader import _drop_last_and_pack  # noqa: E402
+from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
 from chuck_dreamer.sim.episode_writer import EpisodeWriter  # noqa: E402
 
 
