@@ -113,8 +113,7 @@ class ScenePlayer:
     try:
       obs, _ = self.env.reset(scene=self.scene)
       for _ in range(max_steps):
-        if self.state == "ready":
-          self.state = "approach"
+        self.advance_from_ready()
 
         step, obs, terminated, truncated, _ = self._step_once(obs)
         steps.append(step)

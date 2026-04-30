@@ -1,3 +1,5 @@
+from typing import cast
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
@@ -64,7 +66,7 @@ class MLPEncoder(nn.Module):
 
   def __call__(self, obs: mx.array) -> mx.array:
     """obs: (..., obs_dim) -> embedding: (..., embed_dim)"""
-    return self.net(obs)
+    return cast(mx.array, self.net(obs))
 
 
 class MLPDecoder(nn.Module):
@@ -75,7 +77,7 @@ class MLPDecoder(nn.Module):
     self.net = _mlp(feat_dim, hidden, obs_dim)
 
   def __call__(self, feat_in: mx.array) -> mx.array:
-    return self.net(feat_in)
+    return cast(mx.array, self.net(feat_in))
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +157,7 @@ class RSSM(nn.Module):
     x = self.pre_gru(mx.concatenate([prev_s, prev_a], axis=-1))   # (B, hidden)
     # MLX GRU expects (B, T, D); we pass T=1 and squeeze.
     h_seq = self.gru(x[:, None, :], prev_h)                       # (B, 1, deter_dim)
-    return h_seq[:, 0]                                            # (B, deter_dim)
+    return cast(mx.array, h_seq[:, 0])                            # (B, deter_dim)
 
   def img_step(self, prev_state: dict, prev_action: mx.array) -> dict:
     """Imagination step: predict s_t from prior only, no observation."""
@@ -226,7 +228,7 @@ class RewardHead(nn.Module):
     self.net = _mlp(feat_dim, hidden, out_dim=1)
 
   def __call__(self, feat_in: mx.array) -> mx.array:
-    return self.net(feat_in).squeeze(-1)
+    return cast(mx.array, self.net(feat_in).squeeze(-1))
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +299,7 @@ class Critic(nn.Module):
     self.net = _mlp(feat_dim, hidden, out_dim=1)
 
   def __call__(self, feat_in: mx.array) -> mx.array:
-    return self.net(feat_in).squeeze(-1)
+    return cast(mx.array, self.net(feat_in).squeeze(-1))
 
 
 class _WMBundle(nn.Module):
