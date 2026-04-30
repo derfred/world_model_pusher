@@ -1,6 +1,6 @@
 """Model definitions and utilities."""
 
-from chuck_dreamer.dreamer.episode_loader import (
+from chuck_dreamer.training.episode_loader import (
   EpisodeProcessor,
   ImageProcessor,
   StateVectorProcessor,
@@ -8,7 +8,7 @@ from chuck_dreamer.dreamer.episode_loader import (
   load_hdf5_episode,
   load_rerun_episode,
 )
-from chuck_dreamer.dreamer.replay_buffer import ReplayBuffer
+from chuck_dreamer.training.replay_buffer import ReplayBuffer
 
 __all__ = [
   "ReplayBuffer",

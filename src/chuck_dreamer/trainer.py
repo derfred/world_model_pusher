@@ -1,11 +1,12 @@
 import logging
 import os
+import pickle
 
-from chuck_dreamer.sim.data_collection import RandomPushPolicy
+from chuck_dreamer.sim.scripted_policy import ScriptedPolicy
 from chuck_dreamer.sim.pushing_env import PushingEnv
 from chuck_dreamer.sim.scene_player import ScenePlayer
 
-from .dreamer.replay_buffer import ReplayBuffer
+from .training.replay_buffer import ReplayBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class Trainer:
       seed=config.seed,
     )
     self.env    = PushingEnv(config)
-    self.policy = RandomPushPolicy()
+    self.policy = ScriptedPolicy()
     self.player = ScenePlayer(config, self.env, self.policy)
 
   def _warmup(self):
@@ -34,10 +35,8 @@ class Trainer:
       self.player.reset()
       episode_data, outcome = self.player.run_headless(max_steps=self.config.sim.max_steps)
       logger.info(f"Collected episode with outcome: {outcome}")
-      if episode_data is None:
-        logger.warning("Collected episode is empty, skipping.")
-        continue
-      self._replay_buffer.add_sim_episode(episode_data)
+      if episode_data is not None:
+        self._replay_buffer.add_sim_episode(episode_data)
 
   def _train_phase(self):
     pass

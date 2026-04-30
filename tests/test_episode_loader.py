@@ -17,8 +17,8 @@ from chuck_dreamer.dreamer import (  # noqa: E402
   load_hdf5_episode,
   load_rerun_episode,
 )
-from chuck_dreamer.dreamer.episode_loader import _drop_last_and_pack  # noqa: E402
-from chuck_dreamer.sim.data_collection import EpisodeWriter  # noqa: E402
+from chuck_dreamer.training.episode_loader import _drop_last_and_pack  # noqa: E402
+from chuck_dreamer.sim.episode_writer import EpisodeWriter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

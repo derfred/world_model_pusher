@@ -59,7 +59,7 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   from chuck_dreamer.sim import (
     EpisodeWriter,
     PushingEnv,
-    RandomPushPolicy,
+    ScriptedPolicy,
     ScenePlayer,
   )
 
@@ -78,7 +78,7 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   env    = PushingEnv(cfg)
-  policy = RandomPushPolicy()
+  policy = ScriptedPolicy()
   player = ScenePlayer(cfg, env, policy)
   writer = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
@@ -118,7 +118,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   from chuck_dreamer.sim import (
     PushingEnv,
-    RandomPushPolicy,
+    ScriptedPolicy,
     ScenePlayer
   )
 
@@ -129,7 +129,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
-  policy = RandomPushPolicy()
+  policy = ScriptedPolicy()
   player = ScenePlayer(cfg, env, policy)
   player.reset()
 

@@ -16,7 +16,7 @@ from chuck_dreamer.sim import (
     LightingConfig,
     ObjectConfig,
     PushingEnv,
-    RandomPushPolicy,
+    ScriptedPolicy,
     SceneBuilder,
     SceneConfig,
     SceneGenerator,
@@ -427,7 +427,7 @@ class TestPolicyInsertHints:
     cfg = _make_simple_config()
     cfg.target.pos = [0.05, 0.00, 0.03]
     cfg.goal_pos = [0.20, 0.00]
-    p = RandomPushPolicy()
+    p = ScriptedPolicy()
     p.reset(_StubController(), cfg)
     p.state = "ready"
     return p
@@ -561,7 +561,7 @@ class TestEpisodeWriter:
 
 
 # ---------------------------------------------------------------------------
-# RandomPushPolicy tests
+# ScriptedPolicy tests
 # ---------------------------------------------------------------------------
 
 class _StubController:
@@ -593,12 +593,12 @@ def _fresh_policy():
   # Put goal clearly separated from target to keep push_dir well-defined.
   cfg.target.pos = [0.05, 0.00, 0.03]
   cfg.goal_pos = [0.20, 0.00]
-  p = RandomPushPolicy()
+  p = ScriptedPolicy()
   p.reset(_StubController(), cfg)
   return p
 
 
-class TestRandomPushPolicy:
+class TestScriptedPolicy:
   """Exercises the state-machine logic. Controller is stubbed so no MuJoCo is needed."""
 
   def test_initial_state(self):
@@ -613,20 +613,20 @@ class TestRandomPushPolicy:
     assert p.approach_xy[0] < obj[0]
     # Distance equals the standoff.
     d = float(np.linalg.norm(p.approach_xy - obj))
-    assert d == pytest.approx(RandomPushPolicy._STANDOFF, rel=1e-3)
+    assert d == pytest.approx(ScriptedPolicy._STANDOFF, rel=1e-3)
 
   def test_approach_xyz_uses_push_z(self):
     p = _fresh_policy()
-    assert p.approach_xyz[2] == pytest.approx(RandomPushPolicy._PUSH_Z)
+    assert p.approach_xyz[2] == pytest.approx(ScriptedPolicy._PUSH_Z)
 
   def test_goal_xyz_uses_push_z(self):
     p = _fresh_policy()
-    assert p.goal_xyz[2] == pytest.approx(RandomPushPolicy._PUSH_Z)
+    assert p.goal_xyz[2] == pytest.approx(ScriptedPolicy._PUSH_Z)
 
   def test_transition_initial_to_ready(self):
     p = _fresh_policy()
     # EE at ready position → initial should advance to ready.
-    obs = _policy_obs(np.append(p.ready_xy, RandomPushPolicy._PUSH_Z))
+    obs = _policy_obs(np.append(p.ready_xy, ScriptedPolicy._PUSH_Z))
     _, prev = p.act(obs)
     assert prev == "initial"
     assert p.state == "ready"
@@ -635,7 +635,7 @@ class TestRandomPushPolicy:
     """ready → approach is a manual transition; policy itself does not self-advance."""
     p = _fresh_policy()
     p.state = "ready"
-    obs = _policy_obs(np.append(p.ready_xy, RandomPushPolicy._PUSH_Z))
+    obs = _policy_obs(np.append(p.ready_xy, ScriptedPolicy._PUSH_Z))
     _, prev = p.act(obs)
     assert prev is None
     assert p.state == "ready"

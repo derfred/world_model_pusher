@@ -1,11 +1,7 @@
 """MuJoCo pushing simulation package."""
 
-from .data_collection import (
-    EpisodeWriter,
-    HDF5EpisodeWriter,
-    RandomPushPolicy,
-    RerunEpisodeWriter,
-)
+from .episode_writer import EpisodeWriter, HDF5EpisodeWriter, RerunEpisodeWriter
+from .scripted_policy import ScriptedPolicy
 from .scene_player import ScenePlayer
 from .pushing_env import PushingEnv
 from .scene_builder import SceneBuilder
@@ -28,6 +24,6 @@ __all__ = [
     "SceneBuilder",
     "SceneConfig",
     "SceneGenerator",
-    "RandomPushPolicy",
+    "ScriptedPolicy",
     "ScenePlayer",
 ]

@@ -7,7 +7,7 @@ import numpy as np
 from .scene_config import SceneConfig
 
 if TYPE_CHECKING:
-  from .data_collection import RandomPushPolicy
+  from .scripted_policy import ScriptedPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +28,13 @@ def _stack_steps(steps: list[dict[str, Any]]) -> RawEpisode:
 
 class ScenePlayer:
   """
-  Drives a PushingEnv with a RandomPushPolicy.
+  Drives a PushingEnv with a ScriptedPolicy.
 
   Shared logic between the interactive viewer (show-scene) and the
   headless episode collector (generate-scenes).
   """
 
-  def __init__(self, config, env, policy: "RandomPushPolicy") -> None:
+  def __init__(self, config, env, policy: "ScriptedPolicy") -> None:
     self.config = config
     self.env    = env
     self.policy = policy

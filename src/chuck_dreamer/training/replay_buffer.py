@@ -134,6 +134,7 @@ class ReplayBuffer:
   def _append_episode(self, episode: Episode) -> None:
     self._episodes.append(episode)
     self._total_steps += episode["action"].shape[0]
+    print(f"Added episode with {episode['action'].shape[0]} steps; total steps={self._total_steps}")
     self._evict()
 
   def _evict(self) -> None:
