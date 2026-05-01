@@ -31,14 +31,14 @@ def _make_raw_episode(T: int, img_hw: tuple[int, int] = (16, 16)) -> dict:
   H, W = img_hw
   ts = np.arange(T)
   return {
-    "image":      np.stack([np.full((H, W, 3), t, dtype=np.uint8) for t in ts]),
-    "action":     np.stack([np.array([0.1 * t, 0.2 * t, 0.3 * t], dtype=np.float32) for t in ts]),
-    "reward":     ts.astype(np.float32),
-    "timestamp":  (ts * 0.05).astype(np.float32),
-    "joint_qpos": np.stack([np.full((6,), 0.1 * t, dtype=np.float32) for t in ts]),
-    "ee_pos":     np.stack([np.array([0.1, 0.2, 0.3], dtype=np.float32) * t for t in ts]),
-    "ee_quat":    np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (T, 1)),
-    "object_xy":  np.tile(np.array([0.5, 0.5], dtype=np.float32), (T, 1)),
+    "image":        np.stack([np.full((H, W, 3), t, dtype=np.uint8) for t in ts]),
+    "joint_action": np.stack([np.array([0.1 * t, 0.2 * t, 0.3 * t], dtype=np.float32) for t in ts]),
+    "reward":       ts.astype(np.float32),
+    "timestamp":    (ts * 0.05).astype(np.float32),
+    "joint_qpos":   np.stack([np.full((6,), 0.1 * t, dtype=np.float32) for t in ts]),
+    "ee_pos":       np.stack([np.array([0.1, 0.2, 0.3], dtype=np.float32) * t for t in ts]),
+    "ee_quat":      np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (T, 1)),
+    "object_xy":    np.tile(np.array([0.5, 0.5], dtype=np.float32), (T, 1)),
   }
 
 
@@ -55,12 +55,21 @@ def _write_sim_episode(dir_path: Path, fmt: str, T: int = 20) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _step_info_columns(N: int) -> dict:
+  return {
+    "object_xy": np.zeros((N, 2), dtype=np.float32),
+    "ee_pos":    np.zeros((N, 3), dtype=np.float32),
+    "ee_quat":   np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (N, 1)),
+  }
+
+
 def test_drop_last_and_pack_enforces_buffer_invariants():
   N = 10
   obs = np.arange(N * 4, dtype=np.float32).reshape(N, 4)
   raw = {
-    "action": np.arange(N * 2, dtype=np.float32).reshape(N, 2),
+    "joint_action": np.arange(N * 2, dtype=np.float32).reshape(N, 2),
     "reward": np.arange(N, dtype=np.float32),
+    **_step_info_columns(N),
   }
   ep = _drop_last_and_pack(obs, raw)
 
@@ -70,13 +79,17 @@ def test_drop_last_and_pack_enforces_buffer_invariants():
   assert ep["done"].shape == (N - 1,)
   assert ep["done"][-1]
   assert not ep["done"][:-1].any()
+  # step_info columns are present and length-N (matches obs).
+  assert ep["step_info"]["object_xy"].shape == (N, 2)
 
 
 def test_drop_last_rejects_single_step_episode():
   with pytest.raises(ValueError):
     _drop_last_and_pack(
       np.zeros((1, 3), dtype=np.float32),
-      {"action": np.zeros((1, 2), dtype=np.float32), "reward": np.zeros((1,))},
+      {"joint_action": np.zeros((1, 2), dtype=np.float32),
+       "reward": np.zeros((1,)),
+       **_step_info_columns(1)},
     )
 
 
@@ -89,7 +102,7 @@ def test_state_vector_processor_concatenates_state_fields():
   N = 5
   raw = {
     "image": np.zeros((N, 4, 4, 3), dtype=np.uint8),
-    "action": np.zeros((N, 3), dtype=np.float32),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
     "reward": np.zeros((N,), dtype=np.float32),
     "timestamp": np.zeros((N,), dtype=np.float32),
     "joint_qpos": np.ones((N, 6), dtype=np.float32),
@@ -99,20 +112,18 @@ def test_state_vector_processor_concatenates_state_fields():
   }
   ep = StateVectorProcessor()(raw)
 
-  # 3 + 4 + 2 + 6 = 15.
   assert ep["obs"].shape == (N, 15)
-  # Order is ee_pos | ee_quat | object_xy | joint_qpos.
   np.testing.assert_array_equal(ep["obs"][0, 0:3], [2.0, 2.0, 2.0])
   np.testing.assert_array_equal(ep["obs"][0, 3:7], [3.0, 3.0, 3.0, 3.0])
   np.testing.assert_array_equal(ep["obs"][0, 7:9], [4.0, 4.0])
   np.testing.assert_array_equal(ep["obs"][0, 9:15], [1.0] * 6)
 
 
-def test_image_processor_returns_image_as_obs():
+def test_image_processor_returns_image_as_uint8():
   N = 5
   raw = {
     "image": np.stack([np.full((8, 8, 3), t, dtype=np.uint8) for t in range(N)]),
-    "action": np.zeros((N, 3), dtype=np.float32),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
     "reward": np.zeros((N,), dtype=np.float32),
     "timestamp": np.zeros((N,), dtype=np.float32),
     "joint_qpos": np.zeros((N, 6), dtype=np.float32),
@@ -122,8 +133,8 @@ def test_image_processor_returns_image_as_obs():
   }
   ep = ImageProcessor()(raw)
   assert ep["obs"].shape == (N, 8, 8, 3)
-  assert ep["obs"].dtype == np.float32
-  assert float(ep["obs"][3].mean()) == 3.0
+  assert ep["obs"].dtype == np.uint8
+  assert int(ep["obs"][3].mean()) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +147,9 @@ def test_load_hdf5_episode_round_trip(tmp_path):
   raw = load_hdf5_episode(tmp_path / "episode_00000.hdf5")
 
   assert raw["image"].shape == (20, 16, 16, 3)
-  assert raw["action"].shape == (20, 3)
+  assert raw["joint_action"].shape == (20, 3)
   assert raw["reward"].shape == (20,)
-  # Step t's joint_qpos was 0.1 * t (broadcast over 6 joints).
+  assert raw["act_mode"] == "joint"
   np.testing.assert_allclose(raw["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-6)
 
 
@@ -172,10 +183,8 @@ def test_load_rerun_episode_round_trip(tmp_path):
   raw = load_rerun_episode(tmp_path / "episode_00000.rrd")
 
   assert raw["image"].shape == (20, 16, 16, 3)
-  assert raw["action"].shape == (20, 3)
+  assert raw["joint_action"].shape == (20, 3)
   assert raw["reward"].shape == (20,)
-  # Chunks arrive unordered; the loader sorts by step, so values should
-  # still follow the generator pattern joint_qpos[t] = 0.1 * t.
   np.testing.assert_allclose(raw["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-5)
   assert float(raw["image"][3].mean()) == 3.0
 

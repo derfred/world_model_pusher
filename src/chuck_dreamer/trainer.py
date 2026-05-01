@@ -3,7 +3,7 @@ import os
 from collections import defaultdict
 
 from .sim.pushing_env import PushingEnv
-from .sim.scene_player import ScenePlayer
+from .sim.episode_collector import EpisodeCollector
 
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
@@ -24,7 +24,7 @@ class Trainer:
     self.env    = PushingEnv(config)
     self.model  = build_model(config, obs_dim=15, action_dim=6)
     self.policy = DreamerPolicy(self.model)
-    self.player = ScenePlayer(config, self.env, self.policy)
+    self.collector = EpisodeCollector(self.env, self.policy)
     self.tracker = Tracker(config)
     self.tracker.init()
 
@@ -38,8 +38,10 @@ class Trainer:
   def _collect_phase(self):
     collect_data = defaultdict(int)
     for _ in range(self.config.training.num_collect_episodes):
-      self.player.reset()
-      episode_data, outcome = self.player.run_headless(max_steps=self.config.sim.max_steps)
+      scene = self.collector.reset()
+      if self.config.sim.max_steps is not None:
+        scene.max_steps = int(self.config.sim.max_steps)
+      episode_data, outcome = self.collector.run()
       collect_data[outcome] += 1
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)

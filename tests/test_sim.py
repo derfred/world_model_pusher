@@ -20,7 +20,6 @@ from chuck_dreamer.sim import (
     SceneBuilder,
     SceneConfig,
     SceneGenerator,
-    ScenePlayer,
 )
 
 
@@ -265,8 +264,9 @@ class TestPushingEnv:
     assert isinstance(reward, float)
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
-    assert "object_xy" in info
-    assert "ee_pos" in info
+    step_info = info["step_info"]
+    assert step_info.object_xy.shape == (2,)
+    assert step_info.ee_pos.shape == (3,)
 
   def test_action_clipping(self, env):
     cfg = _make_simple_config()
@@ -276,15 +276,15 @@ class TestPushingEnv:
     obs, reward, terminated, truncated, info = env.step(action)
     assert obs["image"].shape == (64, 64, 3)
 
-  def test_episode_terminates_on_timeout(self, env):
+  def test_episode_truncates_on_timeout(self, env):
     cfg = _make_simple_config()
     cfg.max_steps = 3
     env.reset(scene=cfg)
     action = _zero_joint_action(len(cfg.joint_names))
     done = False
     for _ in range(5):
-      _, _, term, _, _ = env.step(action)
-      if term:
+      _, _, term, trunc, _ = env.step(action)
+      if term or trunc:
         done = True
         break
     assert done
@@ -342,10 +342,12 @@ class TestPushingEnv:
     env.reset(scene=cfg)
     action = _zero_joint_action(len(cfg.joint_names))
     _, _, _, _, info = env.step(action)
-    assert info["object_xy"].shape == (2,)
-    assert info["ee_pos"].shape == (3,)
-    assert info["goal_xy"].shape == (2,)
-    assert info["step"] == 1
+    si = info["step_info"]
+    assert si.object_xy.shape == (2,)
+    assert si.ee_pos.shape == (3,)
+    assert si.ee_quat.shape == (4,)
+    assert si.goal_xy.shape == (2,)
+    assert si.step == 1
 
   def test_step_increments_step_count(self, env):
     cfg = _make_simple_config()
@@ -353,7 +355,7 @@ class TestPushingEnv:
     action = _zero_joint_action(len(cfg.joint_names))
     for expected in (1, 2, 3):
       _, _, _, _, info = env.step(action)
-      assert info["step"] == expected
+      assert info["step_info"].step == expected
 
   def test_reset_clears_step_count(self, env):
     cfg = _make_simple_config()
@@ -363,14 +365,15 @@ class TestPushingEnv:
     env.step(action)
     env.reset(scene=cfg)
     _, _, _, _, info = env.step(action)
-    assert info["step"] == 1
+    assert info["step_info"].step == 1
 
   def test_reward_is_negative_distance_to_goal(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
     action = _zero_joint_action(len(cfg.joint_names))
     _, reward, _, _, info = env.step(action)
-    expected = -float(np.linalg.norm(info["object_xy"] - info["goal_xy"]))
+    si = info["step_info"]
+    expected = -float(np.linalg.norm(si.object_xy - si.goal_xy))
     assert reward == pytest.approx(expected, abs=1e-5)
 
   def test_goal_reached_terminates(self, env):
@@ -389,11 +392,12 @@ class TestPushingEnv:
   def test_observation_keys(self, env):
     cfg = _make_simple_config()
     obs, _ = env.reset(scene=cfg)
-    expected = {"image", "ee_pos", "ee_quat", "arm_qpos",
-                "object_xy", "goal_xy", "step", "time"}
+    expected = {"image", "ee_pos", "ee_quat", "arm_qpos", "object_xy", "goal_xy"}
     assert expected.issubset(obs.keys())
-    # Full data.qpos was previously exposed but is no longer needed.
+    # Full data.qpos and step/time are no longer in obs (step/time live in StepInfo).
     assert "qpos" not in obs
+    assert "step" not in obs
+    assert "time" not in obs
 
   def test_initial_qpos_is_applied(self, env):
     cfg = _make_simple_config()
@@ -505,11 +509,22 @@ class TestPolicyInsertHints:
 # ---------------------------------------------------------------------------
 
 class TestEpisodeWriter:
-  def _make_fake_episode(self, T: int = 5, H: int = 64, W: int = 64, n_joints: int = 6):
+  def _make_fake_episode(
+      self,
+      T: int = 5,
+      H: int = 64,
+      W: int = 64,
+      n_joints: int = 6,
+      action_kind: str = "joint_action",
+  ):
     rng = np.random.default_rng(42)
+    if action_kind == "joint_action":
+      action = rng.uniform(-0.02, 0.02, (T, n_joints)).astype(np.float32)
+    else:
+      action = rng.uniform(-0.5, 0.5, (T, 7)).astype(np.float32)
     return {
         "image":      rng.integers(0, 256, (T, H, W, 3), dtype=np.uint8),
-        "action":     rng.uniform(-0.02, 0.02, (T, n_joints)).astype(np.float32),
+        action_kind:  action,
         "reward":     rng.uniform(-1.0, 0.0, (T,)).astype(np.float32),
         "timestamp":  (np.arange(T) * 0.1).astype(np.float32),
         "joint_qpos": rng.uniform(-1.0, 1.0, (T, n_joints)).astype(np.float32),
@@ -518,9 +533,9 @@ class TestEpisodeWriter:
         "object_xy":  rng.uniform(-0.3, 0.3, (T, 2)).astype(np.float32),
     }
 
-  def test_write_and_read_back(self, tmp_path):
+  def test_write_and_read_back_joint_mode(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path), format="hdf5")
-    episode = self._make_fake_episode(T=5, H=64, W=64, n_joints=6)
+    episode = self._make_fake_episode(T=5, H=64, W=64, n_joints=6, action_kind="joint_action")
     cfg = _make_simple_config()
     path = writer.write_episode(
         episode,
@@ -534,20 +549,31 @@ class TestEpisodeWriter:
 
     assert path.exists()
     with h5py.File(path, "r") as f:
-      assert f["images"].shape     == (5, 64, 64, 3)
-      assert f["images"].dtype     == np.uint8
-      assert f["actions"].shape    == (5, 6)
-      assert f["rewards"].shape    == (5,)
-      assert f["timestamps"].shape == (5,)
-      assert f["joint_qpos"].shape == (5, 6)
-      assert f["ee_pos"].shape     == (5, 3)
-      assert f["ee_quat"].shape    == (5, 4)
-      assert f["object_xy"].shape  == (5, 2)
+      assert f["images"].shape         == (5, 64, 64, 3)
+      assert f["images"].dtype         == np.uint8
+      assert f["joint_action"].shape   == (5, 6)
+      assert "ee_action" not in f
+      assert f["rewards"].shape        == (5,)
+      assert f["timestamps"].shape     == (5,)
+      assert f["joint_qpos"].shape     == (5, 6)
+      assert f["ee_pos"].shape         == (5, 3)
+      assert f["ee_quat"].shape        == (5, 4)
+      assert f["object_xy"].shape      == (5, 2)
       meta = f["metadata"]
-      assert int(meta["seed"][()])        == 42
+      assert "joint" in str(meta["act_mode"][()])
+      assert int(meta["seed"][()])     == 42
       assert "sim" in str(meta["source"][()])
       assert "done" in str(meta["outcome"][()])
       assert meta["goal_xy"].shape == (2,)
+
+  def test_write_and_read_back_ee_mode(self, tmp_path):
+    writer = EpisodeWriter(str(tmp_path), format="hdf5")
+    episode = self._make_fake_episode(T=5, action_kind="ee_action")
+    path = writer.write_episode(episode, metadata={"seed": 0, "source": "sim"})
+    with h5py.File(path, "r") as f:
+      assert f["ee_action"].shape == (5, 7)
+      assert "joint_action" not in f
+      assert "ee" in str(f["metadata/act_mode"][()])
 
   def test_config_is_valid_json(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path))
@@ -702,8 +728,12 @@ class TestScriptedPolicy:
 
 
 # ---------------------------------------------------------------------------
-# ScenePlayer tests (fake env + fake policy — no MuJoCo)
+# EpisodeCollector tests (fake env + fake policy — no MuJoCo)
 # ---------------------------------------------------------------------------
+
+from chuck_dreamer.sim import EpisodeCollector
+from chuck_dreamer.sim.step_info import StepInfo
+
 
 def _fake_obs(step: int, n_joints: int = 6):
   return {
@@ -713,26 +743,49 @@ def _fake_obs(step: int, n_joints: int = 6):
       "arm_qpos": np.zeros(n_joints, dtype=np.float32),
       "object_xy": np.array([0.05, 0.0], dtype=np.float32),
       "goal_xy":  np.array([0.2, 0.0], dtype=np.float32),
-      "time":     float(step) * 0.1,
-      "step":     step,
   }
 
 
-class _FakeEnv:
-  """Minimal PushingEnv stand-in. Tracks step count, honors control over done flags."""
+def _fake_step_info(step: int):
+  return StepInfo(
+    object_xy=np.array([0.05, 0.0], dtype=np.float32),
+    ee_pos=np.array([0.0, 0.0, 0.1], dtype=np.float32),
+    ee_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    goal_xy=np.array([0.2, 0.0], dtype=np.float32),
+    step=step,
+    time=float(step) * 0.1,
+  )
 
-  def __init__(self, terminate_at: int | None = None, crash_at: int | None = None, n_joints: int = 6):
+
+class _FakeEnv:
+  """Minimal PushingEnv stand-in. The act_mode controls action_kind in the recorded episode."""
+
+  def __init__(
+      self,
+      terminate_at: int | None = None,
+      truncate_at: int | None = None,
+      crash_at: int | None = None,
+      max_steps: int = 20,
+      n_joints: int = 6,
+      act_mode: str = "ee",
+  ):
     self.terminate_at = terminate_at
+    self.truncate_at  = truncate_at
     self.crash_at     = crash_at
+    self.max_steps    = max_steps
     self.n_joints     = n_joints
+    self.act_mode     = act_mode
     self._step        = 0
-    self.reset_calls  = 0
 
   def generate_scene(self):
-    return _make_simple_config()
+    cfg = _make_simple_config()
+    cfg.max_steps = self.max_steps
+    return cfg
+
+  def policy_obs(self, full_obs):
+    return full_obs  # tests don't care about projection
 
   def reset(self, *, scene=None, seed=None):
-    self.reset_calls += 1
     self._step = 0
     return _fake_obs(0, self.n_joints), {}
 
@@ -741,153 +794,101 @@ class _FakeEnv:
     if self.crash_at is not None and self._step >= self.crash_at:
       raise RuntimeError("simulated IK failure")
     terminated = self.terminate_at is not None and self._step >= self.terminate_at
-    return _fake_obs(self._step, self.n_joints), -0.1, terminated, False, {}
-
-  def _get_obs(self):
-    return _fake_obs(self._step, self.n_joints)
+    truncated  = self.truncate_at  is not None and self._step >= self.truncate_at
+    info = {"step_info": _fake_step_info(self._step)}
+    return _fake_obs(self._step, self.n_joints), -0.1, terminated, truncated, info
 
 
 class _FakePolicy:
-  """Policy stub with scripted state progression. New contract: act -> ndarray."""
+  """Stub policy: returns zeros of the right shape and never reads obs."""
 
-  def __init__(self, states: list[str], n_joints: int = 6):
-    self._states = list(states)
-    self.state = self._states[0] if self._states else "initial"
-    self._idx = 0
-    self.n_joints = n_joints
-    self.act_calls = 0
-    self.insert_hints_calls = 0
+  def __init__(self, action_dim: int = 7):
+    self.action_dim = action_dim
     self.reset_calls = 0
+    self.act_calls = 0
 
   def reset(self, scene):
     self.reset_calls += 1
-    self.state = self._states[0] if self._states else "initial"
-    self._idx = 0
 
   def act(self, obs):
-    if self._idx + 1 < len(self._states):
-      next_state = self._states[self._idx + 1]
-      self.state = next_state
-      self._idx += 1
     self.act_calls += 1
-    return np.zeros(7, dtype=np.float32)
-
-  def insert_hints(self, viewer):
-    self.insert_hints_calls += 1
+    return np.zeros(self.action_dim, dtype=np.float32)
 
 
-class _FakeViewer:
-  def __init__(self, max_frames: int):
-    self._frames = max_frames
-    self.user_scn = type("UserScn", (), {"ngeom": 0, "maxgeom": 100})()
-    self.sync_calls = 0
-
-  def is_running(self):
-    return self._frames > 0
-
-  def sync(self):
-    self.sync_calls += 1
-    self._frames -= 1
+def _make_collector(env, policy):
+  collector = EpisodeCollector(env, policy)
+  collector.reset()
+  return collector
 
 
-class TestScenePlayerHeadless:
-  def _make_player(self, env, policy):
-    cfg = _make_simple_config()
-    cfg.max_steps = 20
-    player = ScenePlayer(cfg, env, policy)
-    player.reset()
-    return player
+class TestEpisodeCollector:
+  def test_outcome_done_when_env_terminates(self):
+    env    = _FakeEnv(terminate_at=3, max_steps=20, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
 
-  def test_auto_advances_ready_to_approach(self):
-    env    = _FakeEnv(terminate_at=None)
-    policy = _FakePolicy(["ready", "ready", "approach", "push", "done"])
-    player = self._make_player(env, policy)
-
-    episode, outcome = player.run_headless(max_steps=10)
-    assert outcome == "done"
-    assert policy.state == "done"
-    assert episode is not None
-    assert episode["action"].shape[0] >= 1
-
-  def test_episode_has_all_required_fields(self):
-    env    = _FakeEnv()
-    policy = _FakePolicy(["approach", "done"])
-    player = self._make_player(env, policy)
-
-    episode, outcome = player.run_headless(max_steps=5)
+    episode, outcome = collector.run()
     assert outcome == "done"
     assert episode is not None
-    expected_keys = {
-        "image", "action", "reward",
-        "timestamp", "joint_qpos", "ee_pos", "ee_quat", "object_xy",
-    }
-    assert expected_keys.issubset(episode.keys())
-    T = episode["action"].shape[0]
-    assert episode["action"].dtype == np.float32
-    assert episode["ee_quat"].shape == (T, 4)
-    assert episode["object_xy"].shape == (T, 2)
+    assert episode["ee_action"].shape == (3, 7)
 
-  def test_outcome_timeout(self):
-    env    = _FakeEnv()
-    policy = _FakePolicy(["approach", "approach", "approach", "approach", "approach"])
-    player = self._make_player(env, policy)
+  def test_outcome_timeout_when_env_truncates(self):
+    env    = _FakeEnv(truncate_at=2, max_steps=20, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
 
-    episode, outcome = player.run_headless(max_steps=3)
+    episode, outcome = collector.run()
     assert outcome == "timeout"
     assert episode is not None
-    assert episode["action"].shape[0] == 3
+    assert episode["ee_action"].shape[0] == 2
 
-  def test_outcome_terminated(self):
-    env    = _FakeEnv(terminate_at=2)
-    policy = _FakePolicy(["approach", "approach", "approach", "approach"])
-    player = self._make_player(env, policy)
+  def test_outcome_timeout_when_max_steps_exhausted(self):
+    env    = _FakeEnv(max_steps=4, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
 
-    episode, outcome = player.run_headless(max_steps=10)
-    assert outcome == "terminated"
+    episode, outcome = collector.run()
+    assert outcome == "timeout"
     assert episode is not None
-    assert episode["action"].shape[0] == 2
+    assert episode["ee_action"].shape[0] == 4
 
   def test_outcome_crashed_returns_partial_data(self):
-    env    = _FakeEnv(crash_at=3)
-    policy = _FakePolicy(["approach"] * 10)
-    player = self._make_player(env, policy)
+    env    = _FakeEnv(crash_at=3, max_steps=20, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
 
-    episode, outcome = player.run_headless(max_steps=10)
+    episode, outcome = collector.run()
     assert outcome == "crashed"
+    # 2 successful steps before the crash on step 3.
     assert episode is not None
-    assert episode["action"].shape[0] == 2
+    assert episode["ee_action"].shape[0] == 2
 
+  def test_records_joint_action_when_act_mode_joint(self):
+    env    = _FakeEnv(terminate_at=2, max_steps=20, act_mode="joint", n_joints=6)
+    policy = _FakePolicy(action_dim=6)
+    collector = _make_collector(env, policy)
 
-class TestScenePlayerInteractive:
-  def _make_player(self, env, policy):
-    cfg = _make_simple_config()
-    return ScenePlayer(cfg, env, policy)
+    episode, outcome = collector.run()
+    assert outcome == "done"
+    assert episode is not None
+    assert "joint_action" in episode
+    assert "ee_action" not in episode
+    assert episode["joint_action"].shape == (2, 6)
 
-  def test_shows_hints_only_while_ready(self):
-    env    = _FakeEnv()
-    policy = _FakePolicy(["ready", "ready", "approach", "approach"])
-    player = self._make_player(env, policy)
-    viewer = _FakeViewer(max_frames=3)
+  def test_episode_has_all_required_fields(self):
+    env    = _FakeEnv(terminate_at=3, max_steps=20, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
 
-    player.run_interactive(viewer, step_delay=0.0)
-    assert policy.insert_hints_calls >= 1
-    assert viewer.sync_calls == 3
-
-  def test_stops_on_done(self):
-    env    = _FakeEnv()
-    policy = _FakePolicy(["approach", "done"])
-    player = self._make_player(env, policy)
-    viewer = _FakeViewer(max_frames=10)
-
-    player.run_interactive(viewer, step_delay=0.0)
-    assert policy.state == "done"
-    assert viewer.sync_calls == 1
-
-  def test_stops_on_env_terminated(self):
-    env    = _FakeEnv(terminate_at=2)
-    policy = _FakePolicy(["approach"] * 10)
-    player = self._make_player(env, policy)
-    viewer = _FakeViewer(max_frames=10)
-
-    player.run_interactive(viewer, step_delay=0.0)
-    assert viewer.sync_calls == 2
+    episode, outcome = collector.run()
+    assert episode is not None
+    expected_keys = {
+        "image", "ee_action", "reward",
+        "timestamp", "joint_qpos", "ee_pos", "ee_quat", "object_xy",
+        "step_info",
+    }
+    assert expected_keys.issubset(episode.keys())
+    si = episode["step_info"]
+    T = episode["ee_action"].shape[0]
+    assert si["object_xy"].shape == (T, 2)
+    assert si["ee_pos"].shape == (T, 3)

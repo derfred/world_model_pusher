@@ -1,14 +1,15 @@
 """Load sim-collected episodes into the replay buffer.
 
-The episode writers in ``chuck_dreamer.sim.data_collection`` record
-T steps of ``(image, action, reward, joint_qpos, ee_pos, ee_quat,
-object_xy, timestamp)`` per file. The replay buffer expects a different
-schema (``obs``, ``action``, ``reward``, ``done``) with one extra obs
-entry (T+1 obs for T actions).
+Episodes recorded by :class:`HDF5EpisodeWriter`/:class:`RerunEpisodeWriter`
+carry one of ``joint_action`` / ``ee_action`` (selected by ``act_mode``
+in metadata), the achieved arm qpos and EE pose per step, and the
+object/goal state needed to recompute reward at training time.
 
-This module bridges the two: a small processor abstraction extracts the
-observation from each raw step; the last step is dropped so the obs
-count is T+1 for T-1 actions, preserving the buffer's invariant.
+The buffer's schema is ``(obs, action, reward, done)`` plus a
+``step_info`` block that mirrors :class:`StepInfo`. This module bridges
+the two: a small processor abstraction extracts the modal observation;
+the last step is dropped so the obs count is T+1 for T actions,
+preserving the buffer's invariant.
 """
 
 from __future__ import annotations
@@ -24,8 +25,11 @@ ProgressCallback = Callable[[int, int, Path], None]
 Progress = Union[bool, ProgressCallback]
 
 
-RawEpisode = dict[str, np.ndarray]
-Episode = dict[str, np.ndarray]
+RawEpisode = dict[str, Any]
+Episode = dict[str, Any]
+
+
+_STEP_INFO_KEYS = ("object_xy", "ee_pos", "ee_quat")
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +41,29 @@ class EpisodeProcessor(Protocol):
   """Converts a raw sim episode into replay-buffer schema.
 
   A processor must return a dict with keys ``obs`` (T+1, *obs_shape),
-  ``action`` (T, action_dim), ``reward`` (T,), ``done`` (T,).
+  ``action`` (T, action_dim), ``reward`` (T,), ``done`` (T,), and
+  ``step_info`` (a dict of T+1-length arrays mirroring StepInfo columns).
   """
 
   def __call__(self, raw: RawEpisode) -> Episode: ...
+
+
+def _slice_step_info(raw: RawEpisode, n: int) -> dict[str, np.ndarray]:
+  """Extract per-step info columns sliced to length ``n``."""
+  out: dict[str, np.ndarray] = {}
+  for key in _STEP_INFO_KEYS:
+    out[key] = np.asarray(raw[key], dtype=np.float32)[:n]
+  if "timestamp" in raw:
+    out["time"] = np.asarray(raw["timestamp"], dtype=np.float32)[:n]
+  return out
+
+
+def _resolve_action(raw: RawEpisode) -> np.ndarray:
+  if "joint_action" in raw:
+    return np.asarray(raw["joint_action"], dtype=np.float32)
+  if "ee_action" in raw:
+    return np.asarray(raw["ee_action"], dtype=np.float32)
+  raise KeyError("raw episode missing an action field (joint_action / ee_action)")
 
 
 def _drop_last_and_pack(obs: np.ndarray, raw: RawEpisode) -> Episode:
@@ -49,23 +72,32 @@ def _drop_last_and_pack(obs: np.ndarray, raw: RawEpisode) -> Episode:
   Sim episodes record N aligned steps of (obs_t, action_t, reward_t).
   We treat the N recorded obs as ``obs[0..N-1]`` and drop the last
   action/reward, yielding N obs and N-1 actions — i.e. T = N-1 with
-  T+1 = N obs. The final ``done`` is set to True.
+  T+1 = N obs. The final ``done`` is set to True. ``step_info`` is
+  sliced to length N (matching obs).
   """
   N = obs.shape[0]
   if N < 2:
     raise ValueError(f"episode too short: {N} steps (need >= 2)")
 
-  action = np.asarray(raw["action"], dtype=np.float32)[: N - 1]
+  action = _resolve_action(raw)[: N - 1]
   reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
   done = np.zeros((N - 1,), dtype=bool)
   done[-1] = True
 
-  return {
-    "obs": obs.astype(np.float32, copy=False),
+  goal_xy = None
+  if "goal_xy" in raw:
+    goal_xy = np.asarray(raw["goal_xy"], dtype=np.float32)
+
+  ep: Episode = {
+    "obs": obs.astype(obs.dtype, copy=False),
     "action": action,
     "reward": reward,
     "done": done,
+    "step_info": _slice_step_info(raw, N),
   }
+  if goal_xy is not None:
+    ep["goal_xy"] = goal_xy
+  return ep
 
 
 class StateVectorProcessor:
@@ -85,11 +117,57 @@ class StateVectorProcessor:
 
 
 class ImageProcessor:
-  """Processor that uses the raw RGB image as the observation."""
+  """Processor that uses the raw RGB image as the observation (uint8)."""
 
   def __call__(self, raw: RawEpisode) -> Episode:
-    obs = np.asarray(raw["image"], dtype=np.float32)
+    obs = np.asarray(raw["image"], dtype=np.uint8)
     return _drop_last_and_pack(obs, raw)
+
+
+class ImageProprioProcessor:
+  """Returns (image, proprio) per step.
+
+  proprio = ee_pos (3) + ee_quat (4) + joint_qpos (n_joints).
+  No object_xy: proprioception is body-internal.
+  """
+
+  def __call__(self, raw: RawEpisode) -> Episode:
+    image = np.asarray(raw["image"], dtype=np.uint8)
+    ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
+    ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
+    joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
+    proprio = np.concatenate([ee_pos, ee_quat, joint_qpos], axis=1)
+
+    N = image.shape[0]
+    if N < 2:
+      raise ValueError(f"episode too short: {N} steps (need >= 2)")
+
+    action = _resolve_action(raw)[: N - 1]
+    reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
+    done = np.zeros((N - 1,), dtype=bool)
+    done[-1] = True
+
+    ep: Episode = {
+      "obs": (image, proprio),
+      "action": action,
+      "reward": reward,
+      "done": done,
+      "step_info": _slice_step_info(raw, N),
+    }
+    if "goal_xy" in raw:
+      ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
+    return ep
+
+
+def processor_for(obs_mode: str) -> EpisodeProcessor:
+  """Build the processor matching a given env ``obs_mode``."""
+  if obs_mode == "state":
+    return StateVectorProcessor()
+  if obs_mode == "image":
+    return ImageProcessor()
+  if obs_mode == "image_proprio":
+    return ImageProprioProcessor()
+  raise ValueError(f"Unknown obs_mode: {obs_mode!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +175,10 @@ class ImageProcessor:
 # ---------------------------------------------------------------------------
 
 
+# Maps RawEpisode key -> HDF5 dataset name. Action datasets are resolved
+# dynamically since exactly one of joint_action / ee_action is present.
 _HDF5_DATASET = {
   "image": "images",
-  "action": "actions",
   "reward": "rewards",
   "timestamp": "timestamps",
   "joint_qpos": "joint_qpos",
@@ -115,17 +194,37 @@ def load_hdf5_episode(path: str | Path) -> RawEpisode:
   with h5py.File(path, "r") as f:
     for key, dataset in _HDF5_DATASET.items():
       raw[key] = np.asarray(f[dataset][()])
+
+    if "joint_action" in f:
+      raw["joint_action"] = np.asarray(f["joint_action"][()])
+    elif "ee_action" in f:
+      raw["ee_action"] = np.asarray(f["ee_action"][()])
+    else:
+      raise KeyError(f"{path}: missing action dataset (joint_action or ee_action)")
+
+    if "metadata" in f:
+      meta = f["metadata"]
+      if "act_mode" in meta:
+        am = meta["act_mode"][()]
+        raw["act_mode"] = am.decode("utf-8") if isinstance(am, bytes) else str(am)
+      if "goal_xy" in meta:
+        raw["goal_xy"] = np.asarray(meta["goal_xy"][()], dtype=np.float32)
   return raw
 
 
 def _collect_chunks_by_entity(recording) -> dict[str, list[dict]]:
   """Group a recording's chunks by entity path, skipping metadata."""
   by_entity: dict[str, list[dict]] = {}
+  static: dict[str, dict] = {}
   for chunk in recording.chunks():
     entity = str(chunk.entity_path)
-    if entity.startswith("/__") or chunk.is_static:
+    if chunk.is_static:
+      static[entity] = chunk.to_record_batch().to_pydict()
+      continue
+    if entity.startswith("/__"):
       continue
     by_entity.setdefault(entity, []).append(chunk.to_record_batch().to_pydict())
+  by_entity["__static__"] = [static]  # stash for later inspection
   return by_entity
 
 
@@ -142,13 +241,7 @@ def _ordered_scalar_column(chunk_dicts: list[dict], step_key: str = "step") -> n
 
 
 def load_rerun_episode(path: str | Path) -> RawEpisode:
-  """Read one Rerun ``.rrd`` episode written by ``RerunEpisodeWriter``.
-
-  Uses the chunk iterator on a loaded recording. Each logged entity
-  (``/action``, ``/reward``, ``/camera/image``, …) yields one or more
-  chunks whose rows are indexed by the ``step`` timeline we set at
-  write time.
-  """
+  """Read one Rerun ``.rrd`` episode written by ``RerunEpisodeWriter``."""
   from rerun.recording import load_recording
 
   rec = load_recording(str(path))
@@ -159,12 +252,19 @@ def load_rerun_episode(path: str | Path) -> RawEpisode:
       raise KeyError(f"entity {entity!r} not found in {path}")
     return _ordered_scalar_column(by_entity[entity])
 
-  action = _scalars("/action")
-  reward = _scalars("/reward").reshape(-1)
-  joint_qpos = _scalars("/joint_qpos")
-  ee_pos = _scalars("/ee_pos")
-  ee_quat = _scalars("/ee_quat")
-  object_xy = _scalars("/object_xy")
+  raw: RawEpisode = {}
+  if "/joint_action" in by_entity:
+    raw["joint_action"] = _scalars("/joint_action")
+  elif "/ee_action" in by_entity:
+    raw["ee_action"] = _scalars("/ee_action")
+  else:
+    raise KeyError(f"{path}: missing action entity (/joint_action or /ee_action)")
+
+  raw["reward"] = _scalars("/reward").reshape(-1)
+  raw["joint_qpos"] = _scalars("/joint_qpos")
+  raw["ee_pos"] = _scalars("/ee_pos")
+  raw["ee_quat"] = _scalars("/ee_quat")
+  raw["object_xy"] = _scalars("/object_xy")
 
   image_rows: list[tuple[int, np.ndarray]] = []
   time_rows: list[tuple[int, float]] = []
@@ -180,19 +280,10 @@ def load_rerun_episode(path: str | Path) -> RawEpisode:
       )
   image_rows.sort(key=lambda x: x[0])
   time_rows.sort(key=lambda x: x[0])
-  images_arr = np.stack([img for _, img in image_rows], axis=0)
-  timestamp = np.asarray([t for _, t in time_rows], dtype=np.float32)
+  raw["image"] = np.stack([img for _, img in image_rows], axis=0)
+  raw["timestamp"] = np.asarray([t for _, t in time_rows], dtype=np.float32)
 
-  return {
-    "image": images_arr,
-    "action": action,
-    "reward": reward,
-    "joint_qpos": joint_qpos,
-    "ee_pos": ee_pos,
-    "ee_quat": ee_quat,
-    "object_xy": object_xy,
-    "timestamp": timestamp,
-  }
+  return raw
 
 
 # ---------------------------------------------------------------------------
@@ -233,17 +324,7 @@ def iter_episodes(
   format: str = "hdf5",
   progress: Progress = False,
 ) -> Iterator[RawEpisode]:
-  """Yield raw episodes from a directory of writer output.
-
-  ``format`` is one of ``"hdf5"`` or ``"rerun"`` and must match the
-  writer used to produce the files.
-
-  ``progress`` controls optional progress reporting:
-    - ``False`` (default): silent
-    - ``True``: use ``tqdm`` if installed, else print one line per file
-    - a callable ``(i, total, path) -> None`` invoked after each episode
-      is loaded (``i`` is 1-based; ``i == total`` on the final call)
-  """
+  """Yield raw episodes from a directory of writer output."""
   directory = Path(directory)
   if format == "hdf5":
     paths = sorted(directory.glob("episode_*.hdf5"))

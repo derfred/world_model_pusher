@@ -129,7 +129,15 @@ class ReplayBuffer:
     if done.shape != (T,):
       raise ValueError(f"done must have shape ({T},); got {done.shape}")
 
-    return {"obs": obs, "action": action, "reward": reward, "done": done}
+    out: Episode = {"obs": obs, "action": action, "reward": reward, "done": done}
+    # Optional pass-through fields: step_info (dict of T+1 columns) and
+    # episode-scalar metadata like goal_xy. Reward recompute (§6) consumes
+    # these; today they round-trip but aren't yet used.
+    if "step_info" in episode:
+      out["step_info"] = episode["step_info"]
+    if "goal_xy" in episode:
+      out["goal_xy"] = episode["goal_xy"]
+    return out
 
   def _append_episode(self, episode: Episode) -> None:
     self._episodes.append(episode)

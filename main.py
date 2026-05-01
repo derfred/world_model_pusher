@@ -52,15 +52,15 @@ def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
               help="Episode output format (hdf5 or rerun)")
 @click.pass_context
 def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_steps, fmt):
-  """Generate pushing scenes using a random push policy."""
+  """Generate pushing scenes using the scripted heuristic policy."""
   from dataclasses import asdict
   from tqdm import tqdm
 
   from chuck_dreamer.sim import (
+    EpisodeCollector,
     EpisodeWriter,
     PushingEnv,
     ScriptedPolicy,
-    ScenePlayer,
   )
 
   cfg = _resolve_cfg(ctx, {
@@ -78,12 +78,14 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   env    = PushingEnv(cfg)
-  policy = ScriptedPolicy()
-  player = ScenePlayer(cfg, env, policy)
+  policy = ScriptedPolicy(auto_advance_from_ready=True)
+  collector = EpisodeCollector(env, policy)
   writer = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
-    scene                   = player.reset()
-    episode_data, outcome   = player.run_headless(max_steps=cfg.sim.max_steps)
+    scene = collector.reset()
+    if cfg.sim.max_steps is not None:
+      scene.max_steps = int(cfg.sim.max_steps)
+    episode_data, outcome = collector.run()
     outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
     if episode_data is None:
@@ -112,15 +114,17 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
 @click.pass_context
 def show_scene(ctx, difficulty, seed, render_size, step_delay):
-  """Generate a scene and run it in the interactive MuJoCo viewer."""
+  """Generate a scene and run it in the interactive MuJoCo viewer.
+
+  Drives the scripted policy directly so the user can press Space to
+  advance from ``ready`` → ``approach`` and see the heuristic push play
+  out, with hint geoms drawn while the policy is in ``ready``.
+  """
+  import time
   import mujoco
   import mujoco.viewer
 
-  from chuck_dreamer.sim import (
-    PushingEnv,
-    ScriptedPolicy,
-    ScenePlayer
-  )
+  from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
   cfg = _resolve_cfg(ctx, {
     "seed": seed,
@@ -130,18 +134,32 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
   policy = ScriptedPolicy()
-  player = ScenePlayer(cfg, env, policy)
-  player.reset()
+  scene  = env.generate_scene()
+  obs, _ = env.reset(scene=scene)
+  policy.reset(scene)
 
   def key_callback(keycode):
-    if keycode == 32 and player.state == "ready":  # Space bar to start the push
-      player.advance_from_ready()
+    if keycode == 32 and policy.state == "ready":  # Space bar
+      policy.advance_from_ready()
       print("Policy state changed: ready → approach")
     return True
 
   click.echo("Launching MuJoCo viewer — close the window to exit.")
   with mujoco.viewer.launch_passive(env.model, env.data, key_callback=key_callback) as v:
-    player.run_interactive(v, step_delay)
+    while v.is_running():
+      prev_state = policy.state
+      action = policy.act(obs)
+      obs, _, terminated, truncated, _ = env.step(action)
+      if policy.state != prev_state:
+        print(f"Policy state changed: {prev_state} → {policy.state}")
+
+      policy.insert_hints(v)
+      v.sync()
+      if step_delay > 0:
+        time.sleep(step_delay)
+
+      if terminated or truncated or policy.state == "done":
+        break
 
   env.close()
 

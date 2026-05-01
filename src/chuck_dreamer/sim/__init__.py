@@ -1,8 +1,8 @@
 """MuJoCo pushing simulation package."""
 
+from .episode_collector import EpisodeCollector
 from .episode_writer import EpisodeWriter, HDF5EpisodeWriter, RerunEpisodeWriter
 from .scripted_policy import ScriptedPolicy
-from .scene_player import ScenePlayer
 from .pushing_env import PushingEnv
 from .scene_builder import SceneBuilder
 from .scene_config import (
@@ -12,9 +12,11 @@ from .scene_config import (
     SceneConfig,
 )
 from .scene_generator import SceneGenerator
+from .step_info import StepInfo
 
 __all__ = [
     "CameraConfig",
+    "EpisodeCollector",
     "EpisodeWriter",
     "HDF5EpisodeWriter",
     "LightingConfig",
@@ -25,5 +27,5 @@ __all__ = [
     "SceneConfig",
     "SceneGenerator",
     "ScriptedPolicy",
-    "ScenePlayer",
+    "StepInfo",
 ]

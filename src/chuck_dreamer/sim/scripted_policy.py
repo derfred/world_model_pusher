@@ -35,13 +35,16 @@ class ScriptedPolicy:
 
   state: str = "initial"  # "initial", "ready", "approach", "push", "done"
 
-  def __init__(self) -> None:
+  def __init__(self, auto_advance_from_ready: bool = False) -> None:
     self.start_xyz: np.ndarray | None = None
     self.scene: SceneConfig | None = None
     # Hold-orientation quaternion captured on first observation. Keeping the
     # gripper aligned with the home pose during the push is what we want; we
     # don't have a strong reason to rotate.
     self.hold_quat: np.ndarray | None = None
+    # Headless episode collection skips the ``ready`` pause; the interactive
+    # viewer keeps it so the user can press space to start the push.
+    self.auto_advance_from_ready = auto_advance_from_ready
 
   @property
   def ready_xy(self) -> np.ndarray:
@@ -158,6 +161,10 @@ class ScriptedPolicy:
   def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
     if self.hold_quat is None:
       self.hold_quat = np.asarray(obs["ee_quat"], dtype=np.float32).copy()
+
+    if self.auto_advance_from_ready and self.state == "ready":
+      self.start_xyz = None
+      self.state     = "approach"
 
     next_state = self._determine_state(obs)
     if next_state is not None and next_state != self.state:

@@ -12,6 +12,7 @@ from gymnasium import spaces
 from .scene_builder import SceneBuilder
 from .scene_generator import SceneGenerator
 from .scene_config import SceneConfig
+from .step_info import StepInfo
 
 Observation = dict[str, Any]
 
@@ -374,15 +375,10 @@ class PushingEnv(gym.Env):
     self.step_count += 1
 
     obs        = self._get_obs()
-    reward     = self._compute_reward()
-    terminated = self._check_done()
-    truncated  = False
-    info: dict[str, Any] = {
-        "object_xy": self._get_object_pos(),
-        "ee_pos": self.controller.get_ee_pos(self.data),
-        "goal_xy": np.array(self.scene.goal_pos, dtype=np.float32),
-        "step": self.step_count,
-    }
+    step_info  = self._build_step_info()
+    reward     = self._compute_reward(step_info)
+    terminated, truncated = self._check_done(step_info)
+    info: dict[str, Any] = {"step_info": step_info}
     return obs, reward, terminated, truncated, info
 
   def render(self) -> np.ndarray | None:  # type: ignore[override]
@@ -415,25 +411,35 @@ class PushingEnv(gym.Env):
         "arm_qpos": self.controller.get_arm_qpos(self.data),
         "object_xy": self._get_object_pos(),
         "goal_xy": np.array(self.scene.goal_pos, dtype=np.float32),
-        "step": self.step_count,
-        "time": float(self.data.time),
     }
 
-  def _compute_reward(self) -> float:
-      assert self.scene is not None
-      obj_pos = self._get_object_pos()
-      goal_pos = np.array(self.scene.goal_pos, dtype=np.float32)
-      distance = float(np.linalg.norm(obj_pos - goal_pos))
-      return -distance
+  def _build_step_info(self) -> StepInfo:
+    assert self.scene is not None and self.data is not None
+    return StepInfo(
+      object_xy=self._get_object_pos(),
+      ee_pos=self.controller.get_ee_pos(self.data),
+      ee_quat=self.controller.get_ee_quat(self.data),
+      goal_xy=np.array(self.scene.goal_pos, dtype=np.float32),
+      step=self.step_count,
+      time=float(self.data.time),
+    )
 
-  def _check_done(self) -> bool:
-      assert self.scene is not None
-      obj_pos = self._get_object_pos()
-      goal_pos = np.array(self.scene.goal_pos, dtype=np.float32)
-      distance = float(np.linalg.norm(obj_pos - goal_pos))
-      at_goal = distance < self.scene.goal_tolerance
-      timeout = self.step_count >= self.scene.max_steps
-      return at_goal or timeout
+  def _compute_reward(self, info: StepInfo) -> float:
+    distance = float(np.linalg.norm(info.object_xy - info.goal_xy))
+    return -distance
+
+  def _check_done(self, info: StepInfo) -> tuple[bool, bool]:
+    """Return ``(terminated, truncated)`` per gym convention.
+
+    ``terminated``: goal reached (MDP-terminal).
+    ``truncated``: max-steps timeout (not MDP-terminal — the agent might
+    still be making progress).
+    """
+    assert self.scene is not None
+    distance = float(np.linalg.norm(info.object_xy - info.goal_xy))
+    at_goal = distance < self.scene.goal_tolerance
+    timeout = self.step_count >= self.scene.max_steps
+    return at_goal, (timeout and not at_goal)
 
   def _get_object_pos(self) -> np.ndarray:
     assert self.model is not None and self.data is not None
