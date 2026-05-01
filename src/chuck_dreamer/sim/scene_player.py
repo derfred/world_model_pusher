@@ -51,15 +51,17 @@ class ScenePlayer:
     scene: SceneConfig = self.env.generate_scene()
     self.scene = scene
     self.env.reset(scene=scene)
-    self.policy.reset(self.env.controller, scene)
+    self.policy.reset(scene)
     return scene
 
   def _step_once(self, obs: dict[str, np.ndarray]) -> tuple[dict[str, Any], dict[str, np.ndarray], bool, bool, str | None]:
-    action, prev_state = self.policy.act(obs)
+    prev_state = self.policy.state
+    action     = self.policy.act(obs)
     next_obs, reward, terminated, truncated, _ = self.env.step(action)
+    transition = prev_state if self.policy.state != prev_state else None
     step = {
         "image":      obs["image"],
-        "action":     np.asarray(action.qpos, dtype=np.float32),
+        "action":     np.asarray(action, dtype=np.float32),
         "reward":     float(reward),
         "timestamp":  float(next_obs["time"]),
         "joint_qpos": np.asarray(next_obs["arm_qpos"], dtype=np.float32),
@@ -67,7 +69,7 @@ class ScenePlayer:
         "ee_quat":    np.asarray(next_obs["ee_quat"],  dtype=np.float32),
         "object_xy":  np.asarray(next_obs["object_xy"], dtype=np.float32),
     }
-    return step, next_obs, bool(terminated), bool(truncated), prev_state
+    return step, next_obs, bool(terminated), bool(truncated), transition
 
   def run_interactive(self, viewer, step_delay: float) -> None:
     """Drive the simulation via a MuJoCo passive viewer.

@@ -1,15 +1,13 @@
 import numpy as np
 
-from ..policy import Policy, Action
 
-
-class DreamerPolicy(Policy):
+class DreamerPolicy:
   def __init__(self, model):
-    super().__init__()
     self.model = model
 
-  def reset(self, controller, scene):
+  def reset(self, scene):
     pass
 
   def act(self, obs):
-    return Action.from_qpos(np.zeros(6)), None
+    # Stub: returns a zero EE pose action with identity quat. Wired up in §6+.
+    return np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)

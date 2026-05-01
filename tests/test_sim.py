@@ -22,7 +22,6 @@ from chuck_dreamer.sim import (
     SceneGenerator,
     ScenePlayer,
 )
-from chuck_dreamer.policy import Action
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +62,13 @@ def _make_simple_config(robot_type: str = "so100") -> SceneConfig:
   )
 
 
-def _make_env_cfg(difficulty: str = "easy", render_size: str = "64x64", seed: int = 42):
+def _make_env_cfg(
+    difficulty: str = "easy",
+    render_size: str = "64x64",
+    seed: int = 42,
+    obs_mode: str = "state",
+    act_mode: str = "joint",
+):
   """Build a DictConfig that PushingEnv / SceneGenerator accept."""
   return OmegaConf.create({
       "seed": seed,
@@ -72,6 +77,10 @@ def _make_env_cfg(difficulty: str = "easy", render_size: str = "64x64", seed: in
           "render_size": render_size,
           "table_size": list(_DEFAULT_TABLE_SIZE),
           "max_steps": 50,
+      },
+      "env": {
+          "obs_mode": obs_mode,
+          "act_mode": act_mode,
       },
   })
 
@@ -84,6 +93,13 @@ def builder():
 @pytest.fixture
 def env():
   e = PushingEnv(_make_env_cfg())
+  yield e
+  e.close()
+
+
+@pytest.fixture
+def env_ee():
+  e = PushingEnv(_make_env_cfg(act_mode="ee"))
   yield e
   e.close()
 
@@ -157,14 +173,13 @@ class TestSceneGenerator:
   def test_validity_checks_reject_bad_target(self):
     gen = SceneGenerator(_make_env_cfg(difficulty="easy"))
     cfg = gen.sample()
-    # Place target out of reach (too far from robot base)
     cfg.target.pos = [0.50, 0.50, cfg.target.pos[2]]
     assert not gen._check_reachability(cfg)
 
   def test_validity_goal_on_table(self):
     gen = SceneGenerator(_make_env_cfg(difficulty="easy"))
     cfg = gen.sample()
-    cfg.goal_pos = [5.0, 5.0]  # way off table
+    cfg.goal_pos = [5.0, 5.0]
     assert not gen._check_goal_on_table(cfg)
 
   def test_multiple_samples_are_valid(self):
@@ -218,11 +233,18 @@ class TestSceneBuilder:
 
 
 # ---------------------------------------------------------------------------
-# PushingEnv tests
+# PushingEnv tests — joint action mode (default for these fixtures)
 # ---------------------------------------------------------------------------
 
-def _zero_action(n_joints: int) -> Action:
-  return Action.from_qpos(np.zeros(n_joints, dtype=np.float32))
+def _zero_joint_action(n_joints: int) -> np.ndarray:
+  return np.zeros(n_joints, dtype=np.float32)
+
+
+def _ee_pose_action(pos: np.ndarray, quat: np.ndarray) -> np.ndarray:
+  return np.concatenate([
+    np.asarray(pos, dtype=np.float32),
+    np.asarray(quat, dtype=np.float32),
+  ])
 
 
 class TestPushingEnv:
@@ -237,7 +259,7 @@ class TestPushingEnv:
   def test_step_returns_correct_shapes(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     obs, reward, terminated, truncated, info = env.step(action)
     assert obs["image"].shape == (64, 64, 3)
     assert isinstance(reward, float)
@@ -249,8 +271,8 @@ class TestPushingEnv:
   def test_action_clipping(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    # Oversized action in joint-space should be clipped without error
-    action = Action.from_qpos(np.full(len(cfg.joint_names), 100.0, dtype=np.float32))
+    # Oversized joint action should be clipped without error.
+    action = np.full(len(cfg.joint_names), 100.0, dtype=np.float32)
     obs, reward, terminated, truncated, info = env.step(action)
     assert obs["image"].shape == (64, 64, 3)
 
@@ -258,7 +280,7 @@ class TestPushingEnv:
     cfg = _make_simple_config()
     cfg.max_steps = 3
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     done = False
     for _ in range(5):
       _, _, term, _, _ = env.step(action)
@@ -268,14 +290,26 @@ class TestPushingEnv:
     assert done
 
   def test_reset_requires_config(self, env):
-    # reset() without scene hits an assert — any of these is fine.
     with pytest.raises((AssertionError, ValueError, TypeError)):
       env.reset()
 
-  def test_observation_and_action_spaces(self, env):
+  def test_observation_and_action_spaces_joint(self, env):
+    cfg = _make_simple_config()
+    env.reset(scene=cfg)
     assert env.observation_space is not None
     assert env.action_space is not None
-    assert env.action_space.shape == (3,)
+    assert env.action_space.shape == (len(cfg.joint_names),)
+
+  def test_action_space_ee_mode(self, env_ee):
+    cfg = _make_simple_config()
+    env_ee.reset(scene=cfg)
+    assert env_ee.action_space.shape == (7,)
+
+  def test_observation_space_state_mode(self, env):
+    cfg = _make_simple_config()
+    env.reset(scene=cfg)
+    # state = ee_pos(3) + ee_quat(4) + object_xy(2) + arm_qpos(n_joints)
+    assert env.observation_space.shape == (3 + 4 + 2 + len(cfg.joint_names),)
 
   def test_render_returns_image(self, env):
     cfg = _make_simple_config()
@@ -286,14 +320,12 @@ class TestPushingEnv:
     assert img.dtype == np.uint8
 
   def test_render_before_reset_returns_none(self, env):
-    # Renderer is only constructed in reset(); before that, render() no-ops.
     assert env.render() is None
 
   def test_close_is_idempotent(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
     env.close()
-    # Second close must not raise even though renderer is already gone.
     env.close()
 
   def test_reset_twice_releases_previous_renderer(self, env):
@@ -302,14 +334,13 @@ class TestPushingEnv:
     env.reset(scene=cfg)
     first_renderer = env.renderer
     env.reset(scene=cfg)
-    # A new renderer is created on the second reset.
     assert env.renderer is not None
     assert env.renderer is not first_renderer
 
   def test_step_info_contents(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     _, _, _, _, info = env.step(action)
     assert info["object_xy"].shape == (2,)
     assert info["ee_pos"].shape == (3,)
@@ -319,7 +350,7 @@ class TestPushingEnv:
   def test_step_increments_step_count(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     for expected in (1, 2, 3):
       _, _, _, _, info = env.step(action)
       assert info["step"] == expected
@@ -327,7 +358,7 @@ class TestPushingEnv:
   def test_reset_clears_step_count(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     env.step(action)
     env.step(action)
     env.reset(scene=cfg)
@@ -337,81 +368,97 @@ class TestPushingEnv:
   def test_reward_is_negative_distance_to_goal(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     _, reward, _, _, info = env.step(action)
-    # Reward = -||object_xy - goal_xy||.
     expected = -float(np.linalg.norm(info["object_xy"] - info["goal_xy"]))
     assert reward == pytest.approx(expected, abs=1e-5)
 
   def test_goal_reached_terminates(self, env):
     cfg = _make_simple_config()
-    # Put the goal right on top of the target so the env is "at goal" immediately.
     cfg.goal_pos = [cfg.target.pos[0], cfg.target.pos[1]]
     cfg.goal_tolerance = 0.5
     env.reset(scene=cfg)
-    action = _zero_action(len(cfg.joint_names))
+    action = _zero_joint_action(len(cfg.joint_names))
     _, _, terminated, _, _ = env.step(action)
     assert terminated
 
   def test_step_without_reset_asserts(self, env):
     with pytest.raises(AssertionError):
-      env.step(_zero_action(6))
+      env.step(_zero_joint_action(6))
 
   def test_observation_keys(self, env):
     cfg = _make_simple_config()
     obs, _ = env.reset(scene=cfg)
     expected = {"image", "ee_pos", "ee_quat", "arm_qpos",
-                "object_xy", "goal_xy", "qpos", "step", "time"}
+                "object_xy", "goal_xy", "step", "time"}
     assert expected.issubset(obs.keys())
+    # Full data.qpos was previously exposed but is no longer needed.
+    assert "qpos" not in obs
 
   def test_initial_qpos_is_applied(self, env):
     cfg = _make_simple_config()
-    # Pick a non-zero home pose so we can detect it was applied.
     cfg.robot_initial_qpos = [0.1, -0.2, 0.3, -0.1, 0.2, -0.3]
     obs, _ = env.reset(scene=cfg)
     assert obs["arm_qpos"] == pytest.approx(cfg.robot_initial_qpos, abs=1e-3)
 
 
 class TestController:
-  """Tests for PushingEnv.Controller — in particular the IK solver."""
+  """Tests for PushingEnv.Controller — IK with the new ik_for_pose API."""
 
-  def test_ik_converges_to_current_ee_position(self, env):
-    """IK for the current EE position should return a qpos ≈ the current qpos
-    (zero residual)."""
+  def test_ik_position_only_at_current_returns_current_qpos(self, env):
+    """Position-only IK at the current EE position returns ≈ the current qpos."""
     cfg = _make_simple_config()
     obs, _ = env.reset(scene=cfg)
     current_ee = obs["ee_pos"].astype(np.float64)
-    q = env.controller.ik_for_ee_pos(current_ee, obs["qpos"])
+    q = env.controller.ik_for_pose(env.data, current_ee, target_quat=None)
     assert np.all(np.isfinite(q))
     assert q.shape == obs["arm_qpos"].shape
+    np.testing.assert_allclose(q, obs["arm_qpos"], atol=1e-3)
 
-  def test_ik_moves_toward_target(self, env):
-    """IK for a nearby reachable target should return a qpos that, when applied,
-    brings the EE much closer to the target."""
+  def test_ik_position_only_moves_toward_target(self, env):
+    """Position IK for a nearby reachable target should bring the EE closer."""
     cfg = _make_simple_config()
     obs, _ = env.reset(scene=cfg)
     current_ee = obs["ee_pos"].astype(np.float64)
     target = current_ee + np.array([0.02, 0.0, 0.0])
-    q_new = env.controller.ik_for_ee_pos(target, obs["qpos"])
+    q_new = env.controller.ik_for_pose(env.data, target, target_quat=None)
 
-    # Apply the solution and check EE is much closer to the target.
     env.controller.reset_initial_qpos(env.data, q_new)
     new_ee = env.controller.get_ee_pos(env.data).astype(np.float64)
     assert np.linalg.norm(new_ee - target) < np.linalg.norm(current_ee - target)
 
-  def test_ik_raises_when_diverged(self, env):
-    """A wildly-unreachable target should either raise RuntimeError or return
-    something finite (the cap on dq makes true divergence rare)."""
+  def test_ik_pose_with_current_quat_converges(self, env):
+    """6-DOF IK at the current pose (pos + quat) converges to current qpos."""
+    cfg = _make_simple_config()
+    obs, _ = env.reset(scene=cfg)
+    current_ee   = obs["ee_pos"].astype(np.float64)
+    current_quat = obs["ee_quat"].astype(np.float64)
+    q = env.controller.ik_for_pose(env.data, current_ee, target_quat=current_quat)
+    assert np.all(np.isfinite(q))
+    np.testing.assert_allclose(q, obs["arm_qpos"], atol=1e-3)
+
+  def test_ik_raises_when_unreachable(self, env):
+    """A wildly-unreachable target should raise RuntimeError."""
     cfg = _make_simple_config()
     obs, _ = env.reset(scene=cfg)
     unreachable = np.array([100.0, 100.0, 100.0])
     with pytest.raises(RuntimeError):
-      env.controller.ik_for_ee_pos(unreachable, obs["qpos"])
+      env.controller.ik_for_pose(env.data, unreachable, target_quat=None)
+
+  def test_ee_step_runs_through_ik(self, env_ee):
+    """End-to-end: an EE-mode step uses IK and lands close to the target."""
+    cfg = _make_simple_config()
+    obs, _ = env_ee.reset(scene=cfg)
+    target_pos = obs["ee_pos"] + np.array([0.01, 0.0, 0.0], dtype=np.float32)
+    action = _ee_pose_action(target_pos, obs["ee_quat"])
+    next_obs, _, _, _, _ = env_ee.step(action)
+    # The actuator may not fully track the IK solution in one step; we
+    # only require the EE moved toward the target.
+    assert np.linalg.norm(next_obs["ee_pos"] - target_pos) <= np.linalg.norm(obs["ee_pos"] - target_pos)
 
 
 class _FakeViewerWithGeoms:
-  """Minimal viewer stand-in for insert_hints — exposes a user_scn with a
-  fixed-size geoms buffer."""
+  """Minimal viewer stand-in for insert_hints."""
 
   def __init__(self, maxgeom: int):
     self.user_scn = type("UserScn", (), {})()
@@ -428,7 +475,7 @@ class TestPolicyInsertHints:
     cfg.target.pos = [0.05, 0.00, 0.03]
     cfg.goal_pos = [0.20, 0.00]
     p = ScriptedPolicy()
-    p.reset(_StubController(), cfg)
+    p.reset(cfg)
     p.state = "ready"
     return p
 
@@ -441,7 +488,7 @@ class TestPolicyInsertHints:
   def test_insert_hints_noop_when_geom_buffer_full(self):
     policy = self._make_policy()
     viewer = _FakeViewerWithGeoms(maxgeom=2)
-    viewer.user_scn.ngeom = 2  # already full
+    viewer.user_scn.ngeom = 2
     policy.insert_hints(viewer)
     assert viewer.user_scn.ngeom == 2
 
@@ -564,42 +611,30 @@ class TestEpisodeWriter:
 # ScriptedPolicy tests
 # ---------------------------------------------------------------------------
 
-class _StubController:
-  """Minimal controller stand-in: IK returns the same qpos it was given."""
-
-  def __init__(self, arm_qpos_adr=None):
-    self.arm_qpos_adr = np.asarray(arm_qpos_adr if arm_qpos_adr is not None else [0, 1, 2, 3, 4, 5])
-
-  def ik_for_ee_pos(self, target_xyz, qpos):
-    # Return a (6,) arm qpos — Action.from_qpos asserts shape (6,).
-    q = np.asarray(qpos, dtype=np.float32)
-    if q.shape != (6,):
-      q = q[self.arm_qpos_adr] if q.ndim == 1 and q.size >= 6 else np.zeros(6, dtype=np.float32)
-    return q.copy()
+_IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-def _policy_obs(ee_pos, qpos=None, n_joints: int = 6):
+def _policy_obs(ee_pos, qpos=None, n_joints: int = 6, ee_quat: np.ndarray = _IDENTITY_QUAT):
   qpos_arr = (np.zeros(n_joints, dtype=np.float32)
               if qpos is None else np.asarray(qpos, dtype=np.float32))
   return {
       "ee_pos":   np.asarray(ee_pos, dtype=np.float32),
+      "ee_quat":  np.asarray(ee_quat, dtype=np.float32),
       "arm_qpos": qpos_arr,
-      "qpos":     qpos_arr,
   }
 
 
 def _fresh_policy():
   cfg = _make_simple_config()
-  # Put goal clearly separated from target to keep push_dir well-defined.
   cfg.target.pos = [0.05, 0.00, 0.03]
   cfg.goal_pos = [0.20, 0.00]
   p = ScriptedPolicy()
-  p.reset(_StubController(), cfg)
+  p.reset(cfg)
   return p
 
 
 class TestScriptedPolicy:
-  """Exercises the state-machine logic. Controller is stubbed so no MuJoCo is needed."""
+  """Exercises the state-machine logic. Policy outputs (7,) EE poses."""
 
   def test_initial_state(self):
     p = _fresh_policy()
@@ -607,11 +642,9 @@ class TestScriptedPolicy:
 
   def test_approach_xy_offsets_behind_object(self):
     p = _fresh_policy()
+    assert p.scene is not None
     obj = np.array(p.scene.target.pos[:2])
-    # Approach point lies behind the object (opposite side from the goal).
-    # Since goal is +x of the object, approach is at -x of the object.
     assert p.approach_xy[0] < obj[0]
-    # Distance equals the standoff.
     d = float(np.linalg.norm(p.approach_xy - obj))
     assert d == pytest.approx(ScriptedPolicy._STANDOFF, rel=1e-3)
 
@@ -625,10 +658,8 @@ class TestScriptedPolicy:
 
   def test_transition_initial_to_ready(self):
     p = _fresh_policy()
-    # EE at ready position → initial should advance to ready.
     obs = _policy_obs(np.append(p.ready_xy, ScriptedPolicy._PUSH_Z))
-    _, prev = p.act(obs)
-    assert prev == "initial"
+    p.act(obs)
     assert p.state == "ready"
 
   def test_ready_is_sticky_without_external_signal(self):
@@ -636,41 +667,38 @@ class TestScriptedPolicy:
     p = _fresh_policy()
     p.state = "ready"
     obs = _policy_obs(np.append(p.ready_xy, ScriptedPolicy._PUSH_Z))
-    _, prev = p.act(obs)
-    assert prev is None
+    p.act(obs)
     assert p.state == "ready"
 
   def test_transition_approach_to_push(self):
     p = _fresh_policy()
     p.state = "approach"
     obs = _policy_obs(p.approach_xyz)
-    _, prev = p.act(obs)
-    assert prev == "approach"
+    p.act(obs)
     assert p.state == "push"
 
   def test_transition_push_to_done(self):
     p = _fresh_policy()
     p.state = "push"
     obs = _policy_obs(p.goal_xyz)
-    _, prev = p.act(obs)
-    assert prev == "push"
+    p.act(obs)
     assert p.state == "done"
 
   def test_done_is_terminal(self):
     p = _fresh_policy()
     p.state = "done"
     obs = _policy_obs(p.goal_xyz)
-    _, prev = p.act(obs)
-    assert prev is None
+    p.act(obs)
     assert p.state == "done"
 
-  def test_act_returns_action_and_prev_state_tuple(self):
+  def test_act_returns_pose_action(self):
     p = _fresh_policy()
     obs = _policy_obs(np.array([0.0, 0.0, 0.1]))
-    action, prev = p.act(obs)
-    assert isinstance(action, Action)
-    # prev_state is None when no transition happened, else the prior state.
-    assert prev is None or isinstance(prev, str)
+    action = p.act(obs)
+    assert isinstance(action, np.ndarray)
+    assert action.shape == (7,)
+    # Quat half should match the captured hold_quat (set on first act).
+    np.testing.assert_array_equal(action[3:], _IDENTITY_QUAT)
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +713,6 @@ def _fake_obs(step: int, n_joints: int = 6):
       "arm_qpos": np.zeros(n_joints, dtype=np.float32),
       "object_xy": np.array([0.05, 0.0], dtype=np.float32),
       "goal_xy":  np.array([0.2, 0.0], dtype=np.float32),
-      "qpos":     np.zeros(n_joints, dtype=np.float32),
       "time":     float(step) * 0.1,
       "step":     step,
   }
@@ -700,7 +727,6 @@ class _FakeEnv:
     self.n_joints     = n_joints
     self._step        = 0
     self.reset_calls  = 0
-    self.controller   = _StubController()
 
   def generate_scene(self):
     return _make_simple_config()
@@ -722,7 +748,7 @@ class _FakeEnv:
 
 
 class _FakePolicy:
-  """Policy stub with scripted state progression."""
+  """Policy stub with scripted state progression. New contract: act -> ndarray."""
 
   def __init__(self, states: list[str], n_joints: int = 6):
     self._states = list(states)
@@ -733,21 +759,18 @@ class _FakePolicy:
     self.insert_hints_calls = 0
     self.reset_calls = 0
 
-  def reset(self, controller, scene):
+  def reset(self, scene):
     self.reset_calls += 1
     self.state = self._states[0] if self._states else "initial"
     self._idx = 0
 
   def act(self, obs):
-    prev = None
     if self._idx + 1 < len(self._states):
       next_state = self._states[self._idx + 1]
-      if next_state != self.state:
-        prev = self.state
-        self.state = next_state
+      self.state = next_state
       self._idx += 1
     self.act_calls += 1
-    return Action.from_qpos(np.zeros(self.n_joints, dtype=np.float32)), prev
+    return np.zeros(7, dtype=np.float32)
 
   def insert_hints(self, viewer):
     self.insert_hints_calls += 1
@@ -782,7 +805,6 @@ class TestScenePlayerHeadless:
 
     episode, outcome = player.run_headless(max_steps=10)
     assert outcome == "done"
-    # The player flipped ready → approach before calling act().
     assert policy.state == "done"
     assert episode is not None
     assert episode["action"].shape[0] >= 1
@@ -806,7 +828,6 @@ class TestScenePlayerHeadless:
     assert episode["object_xy"].shape == (T, 2)
 
   def test_outcome_timeout(self):
-    # Policy never reaches "done"; env never terminates.
     env    = _FakeEnv()
     policy = _FakePolicy(["approach", "approach", "approach", "approach", "approach"])
     player = self._make_player(env, policy)
@@ -817,7 +838,6 @@ class TestScenePlayerHeadless:
     assert episode["action"].shape[0] == 3
 
   def test_outcome_terminated(self):
-    # Env terminates on step 2; policy never reaches "done".
     env    = _FakeEnv(terminate_at=2)
     policy = _FakePolicy(["approach", "approach", "approach", "approach"])
     player = self._make_player(env, policy)
@@ -834,7 +854,6 @@ class TestScenePlayerHeadless:
 
     episode, outcome = player.run_headless(max_steps=10)
     assert outcome == "crashed"
-    # Two successful steps happened before the crash on step 3.
     assert episode is not None
     assert episode["action"].shape[0] == 2
 
@@ -851,7 +870,6 @@ class TestScenePlayerInteractive:
     viewer = _FakeViewer(max_frames=3)
 
     player.run_interactive(viewer, step_delay=0.0)
-    # Hints inserted while state was "ready" (initial frame only — state advances each act).
     assert policy.insert_hints_calls >= 1
     assert viewer.sync_calls == 3
 
@@ -862,7 +880,6 @@ class TestScenePlayerInteractive:
     viewer = _FakeViewer(max_frames=10)
 
     player.run_interactive(viewer, step_delay=0.0)
-    # One act call advances to done, then the loop exits.
     assert policy.state == "done"
     assert viewer.sync_calls == 1
 

@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import cast
 
 import mujoco  # type: ignore[import-untyped]
 import numpy as np
 
 from .scene_config import SceneConfig
-from ..policy import Policy, Action
 
 logger = logging.getLogger(__name__)
 
 
-class ScriptedPolicy(Policy):
+class ScriptedPolicy:
   """
       A simple heuristic push policy.
 
@@ -23,7 +22,9 @@ class ScriptedPolicy(Policy):
       State 3 — push: once close, move toward the goal.
       State 4 — done: push complete, hold position.
 
-      Returns a (3,) float32 action [dx, dy, dz].
+      Returns a (7,) float32 EE pose action ``[x, y, z, qw, qx, qy, qz]``.
+      The env's IK warm-starts from the current joint configuration, so the
+      lookahead-based segment chasing produces smooth joint motion.
   """
 
   _PUSH_Z = 0.075          # EE height — midpoint of typical object side
@@ -35,17 +36,23 @@ class ScriptedPolicy(Policy):
   state: str = "initial"  # "initial", "ready", "approach", "push", "done"
 
   def __init__(self) -> None:
-    self.controller: Any = None
     self.start_xyz: np.ndarray | None = None
+    self.scene: SceneConfig | None = None
+    # Hold-orientation quaternion captured on first observation. Keeping the
+    # gripper aligned with the home pose during the push is what we want; we
+    # don't have a strong reason to rotate.
+    self.hold_quat: np.ndarray | None = None
 
   @property
   def ready_xy(self) -> np.ndarray:
+    assert self.scene is not None
     base  = np.array(self.scene.robot_base_pos[:2], dtype=np.float64)
     zero  = np.array([0.0, 0.0], dtype=np.float64)
     return cast(np.ndarray, base + (zero - base) * 0.3)
 
   @property
   def goal_xy(self) -> np.ndarray:
+    assert self.scene is not None
     return np.array(self.scene.goal_pos, dtype=np.float64)
 
   @property
@@ -54,6 +61,7 @@ class ScriptedPolicy(Policy):
 
   @property
   def object_xy(self) -> np.ndarray:
+    assert self.scene is not None
     return np.array(self.scene.target.pos[:2], dtype=np.float64)
 
   @property
@@ -70,6 +78,14 @@ class ScriptedPolicy(Policy):
   @property
   def approach_xyz(self) -> np.ndarray:
     return cast(np.ndarray, np.append(self.approach_xy, self._PUSH_Z))
+
+  def _pose(self, xyz: np.ndarray) -> np.ndarray:
+    """Pack [x, y, z] + hold quaternion into a (7,) action."""
+    assert self.hold_quat is not None
+    return np.concatenate([
+      np.asarray(xyz, dtype=np.float32),
+      self.hold_quat.astype(np.float32),
+    ])
 
   def _determine_state(self, obs: dict[str, np.ndarray]) -> str | None:
       if self.state == "initial":
@@ -88,7 +104,7 @@ class ScriptedPolicy(Policy):
       start_xyz: np.ndarray,
       target_xyz: np.ndarray,
       obs: dict[str, np.ndarray],
-  ) -> Action:
+  ) -> np.ndarray:
     if self.start_xyz is None:
       self.start_xyz = np.asarray(start_xyz, dtype=np.float64).copy()
 
@@ -100,7 +116,7 @@ class ScriptedPolicy(Policy):
     segment = end - start
     seg_len = float(np.linalg.norm(segment))
     if seg_len < 1e-6:
-        return Action.from_qpos(self.controller.ik_for_ee_pos(end, obs["qpos"]))
+        return self._pose(end)
     direction = segment / seg_len
 
     # Project current EE position onto the segment to find actual progress.
@@ -115,44 +131,40 @@ class ScriptedPolicy(Policy):
     commanded_progress = min(progress + self._LOOKAHEAD, seg_len)
     commanded = start + direction * commanded_progress
 
-    return Action.from_qpos(self.controller.ik_for_ee_pos(commanded, obs["qpos"]))
+    return self._pose(commanded)
 
-  def _act_initial(self, obs: dict[str, np.ndarray]) -> Action:
+  def _act_initial(self, obs: dict[str, np.ndarray]) -> np.ndarray:
     target = np.append(self.ready_xy, self._PUSH_Z)
     return self._step_to(obs["ee_pos"], target, obs)
 
-  def _act_ready(self, obs: dict[str, np.ndarray]) -> Action:
-    return Action.from_qpos(obs["arm_qpos"])
+  def _act_ready(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+    return self._pose(np.asarray(obs["ee_pos"], dtype=np.float64))
 
-  def _act_approach(self, obs: dict[str, np.ndarray]) -> Action:
+  def _act_approach(self, obs: dict[str, np.ndarray]) -> np.ndarray:
     return self._step_to(obs["ee_pos"], self.approach_xyz, obs)
 
-  def _act_push(self, obs: dict[str, np.ndarray]) -> Action:
+  def _act_push(self, obs: dict[str, np.ndarray]) -> np.ndarray:
     return self._step_to(self.approach_xyz, self.goal_xyz, obs)
 
-  def _act_done(self, obs: dict[str, np.ndarray]) -> Action:
-    return Action.from_qpos(obs["arm_qpos"])
+  def _act_done(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+    return self._pose(np.asarray(obs["ee_pos"], dtype=np.float64))
 
-  def reset(self, controller, scene: SceneConfig) -> None:
-    self.controller = controller
+  def reset(self, scene: SceneConfig) -> None:
     self.scene      = scene
     self.state      = "initial"
     self.start_xyz  = None
+    self.hold_quat  = None
 
-  def act(self, obs: dict[str, np.ndarray]) -> tuple[Action, str | None]:
-    cur_state  = self.state
+  def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+    if self.hold_quat is None:
+      self.hold_quat = np.asarray(obs["ee_quat"], dtype=np.float32).copy()
+
     next_state = self._determine_state(obs)
-    changed    = next_state is not None and next_state != cur_state
-    if changed:
-      assert next_state is not None
+    if next_state is not None and next_state != self.state:
       self.start_xyz = None
       self.state     = next_state
 
-    action = getattr(self, f"_act_{self.state}")(obs)
-    return action, (cur_state if changed else None)
-
-  def is_done(self) -> bool:
-    return self.state == "done"
+    return cast(np.ndarray, getattr(self, f"_act_{self.state}")(obs))
 
   def insert_hints(self, viewer: mujoco.Viewer, rgba: np.ndarray = np.array([0.0, 1.0, 0.0, 0.8], dtype=np.float32)) -> None:
     """Insert custom geoms into the scene for visualization hints."""
@@ -201,3 +213,6 @@ class ScriptedPolicy(Policy):
   def advance_from_ready(self) -> None:
     if self.state == "ready":
       self.state = "approach"
+
+  def is_done(self) -> bool:
+    return self.state == "done"
