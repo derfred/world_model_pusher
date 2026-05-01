@@ -97,61 +97,6 @@ def merge_overrides(
     return cast(DictConfig, OmegaConf.merge(base_config, OmegaConf.create(clean)))
 
 
-def validate_config(config: DictConfig) -> bool:
-    """
-    Validate configuration parameters.
-
-    Args:
-        config: Configuration to validate
-
-    Returns:
-        True if configuration is valid, False otherwise
-    """
-    try:
-        # Check required fields
-        required_fields = [
-            "model.observation_dim",
-            "model.action_dim",
-            "training.batch_size",
-            "training.learning_rate"
-        ]
-
-        for field in required_fields:
-            if OmegaConf.select(config, field) is None:
-                logger.error(
-                    f"Required field '{field}' is missing from configuration")
-                return False
-
-        # Check value ranges
-        if config.training.learning_rate <= 0:
-            logger.error("Learning rate must be positive")
-            return False
-
-        if config.training.batch_size <= 0:
-            logger.error("Batch size must be positive")
-            return False
-
-        if config.model.latent_dim <= 0:
-            logger.error("Latent dimension must be positive")
-            return False
-
-        logger.info("Configuration validation passed")
-        return True
-
-    except Exception as e:
-        logger.error(f"Configuration validation failed: {e}")
-        return False
-
-
 if __name__ == "__main__":
-    # Example usage
     config = get_default_config()
-    print("Default configuration:")
     print(OmegaConf.to_yaml(config))
-
-    # Validate configuration
-    is_valid = validate_config(config)
-    print(f"Configuration is valid: {is_valid}")
-
-    # Save configuration
-    save_config(config, "configs/default.yaml")

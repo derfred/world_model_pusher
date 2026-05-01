@@ -219,7 +219,7 @@ def test_actor_initial_std_uses_init_std_offset():
 
 def test_dreamer_model_builds_from_default_config():
   cfg = load_config()
-  model = build_model(cfg, obs_dim=15, action_dim=6)
+  model = build_model(cfg, obs_shape=(15,), action_dim=6)
   assert isinstance(model, DreamerMLXModel)
   assert isinstance(model.encoder, MLPEncoder)
   assert isinstance(model.decoder, MLPDecoder)
@@ -232,7 +232,7 @@ def test_dreamer_model_builds_from_default_config():
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = load_config()
   B, T, obs_dim, action_dim = 2, 4, 15, 6
-  model = build_model(cfg, obs_dim=obs_dim, action_dim=action_dim)
+  model = build_model(cfg, obs_shape=(obs_dim,), action_dim=action_dim)
 
   obs = mx.zeros((B, T, obs_dim))
   actions = mx.zeros((B, T, action_dim))
@@ -261,7 +261,7 @@ def test_dreamer_model_end_to_end_forward_shapes():
 
 def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
   cfg = load_config()
-  model = build_model(cfg, obs_dim=15, action_dim=6)
+  model = build_model(cfg, obs_shape=(15,), action_dim=6)
 
   init = model.rssm.initial_state(batch_size=3)
 
@@ -276,22 +276,15 @@ def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
     assert st["s"].shape == (3, cfg.model.rssm.stoch_size)
 
 
-def test_dreamer_model_rejects_unknown_encoder_type():
+def test_dreamer_model_rejects_unsupported_obs_mode():
   cfg = load_config()
-  cfg.model.encoder.type = "conv"  # not implemented
-  with pytest.raises(ValueError, match="encoder"):
-    build_model(cfg, obs_dim=15, action_dim=6)
-
-
-def test_dreamer_model_rejects_unknown_decoder_type():
-  cfg = load_config()
-  cfg.model.decoder.type = "deconv"  # not implemented
-  with pytest.raises(ValueError, match="decoder"):
-    build_model(cfg, obs_dim=15, action_dim=6)
+  cfg.env.obs_mode = "image"  # CNN encoder/decoder not yet implemented
+  with pytest.raises(NotImplementedError):
+    build_model(cfg, obs_shape=(64, 64, 3), action_dim=7)
 
 
 def test_build_model_rejects_unknown_device():
   cfg = load_config()
   cfg.hardware.device = "cuda"
   with pytest.raises(ValueError):
-    build_model(cfg, obs_dim=15, action_dim=6)
+    build_model(cfg, obs_shape=(15,), action_dim=6)

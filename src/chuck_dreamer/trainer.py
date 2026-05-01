@@ -28,8 +28,11 @@ class Trainer:
       seed=config.seed,
     )
 
-    self.model  = build_model(config, obs_dim=15, action_dim=6)
-    self.policy = DreamerPolicy(self.model)
+    obs_shape  = self.env.observation_space.shape
+    action_dim = int(self.env.action_space.shape[0])
+
+    self.model  = build_model(config, obs_shape=obs_shape, action_dim=action_dim)
+    self.policy = DreamerPolicy(self.model, act_mode=self.env.act_mode)
     self.collector = EpisodeCollector(self.env, self.policy)
     self.tracker = Tracker(config)
     self.tracker.init()

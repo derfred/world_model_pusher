@@ -313,20 +313,22 @@ class _WMBundle(nn.Module):
 
 
 class DreamerMLXModel:
-  def __init__(self, config, obs_dim: int, action_dim: int, training: bool = True):
+  def __init__(self, config, obs_shape: tuple[int, ...], action_dim: int, training: bool = True):
     self.config   = config
     self.training = training
     feat_dim      = config.model.rssm.stoch_size + config.model.rssm.deter_size
 
-    if config.model.encoder.type == "mlp":
+    obs_mode = config.env.obs_mode
+    if obs_mode == "state":
+      if len(obs_shape) != 1:
+        raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
+      obs_dim = obs_shape[0]
       self.encoder = MLPEncoder(obs_dim, tuple(config.model.encoder.mlp_hidden), config.model.encoder.embed_size)
-    else:
-      raise ValueError(f"Unsupported encoder type: {config.model.encoder.type}")
-
-    if config.model.decoder.type == "mlp":
       self.decoder = MLPDecoder(feat_dim, tuple(config.model.decoder.mlp_hidden), obs_dim)
     else:
-      raise ValueError(f"Unsupported decoder type: {config.model.decoder.type}")
+      raise NotImplementedError(
+        f"obs_mode={obs_mode!r} encoder/decoder not yet implemented; only 'state' is wired."
+      )
 
     self.rssm = RSSM(
       action_dim=action_dim,

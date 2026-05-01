@@ -9,14 +9,12 @@ model:
     hidden_size: 200
     min_stddev: 0.1
   encoder:
-    type: "mlp"  # "conv" or "mlp"
     embed_size: 200
     mlp_hidden: [200, 200]
     cnn_channels: [32, 64, 128]
     cnn_kernels: [4, 4, 4]
     cnn_strides: [2, 2, 2]
   decoder:
-    type: "mlp"  # "deconv" or "mlp"
     mlp_hidden: [200, 200]
     cnn_channels: [128, 64, 32]
     cnn_kernels: [4, 4, 4]
