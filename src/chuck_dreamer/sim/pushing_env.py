@@ -9,6 +9,7 @@ import mujoco  # type: ignore[import-untyped]
 import numpy as np
 from gymnasium import spaces
 
+from ..reward import GoalDistanceReward
 from .scene_builder import SceneBuilder
 from .scene_generator import SceneGenerator
 from .scene_config import SceneConfig
@@ -258,6 +259,11 @@ class PushingEnv(gym.Env):
     self.scene: SceneConfig | None = None
     self.controller: Controller = Controller()
     self.step_count: int = 0
+    # The env records reward under the default reward function so that
+    # downstream tools (analysis, plotting) see consistent values. The
+    # buffer recomputes reward at sample time using whatever ``RewardFn``
+    # the trainer is configured with.
+    self._default_reward_fn = GoalDistanceReward()
 
   @property
   def render_size(self) -> tuple[int, int]:
@@ -425,8 +431,7 @@ class PushingEnv(gym.Env):
     )
 
   def _compute_reward(self, info: StepInfo) -> float:
-    distance = float(np.linalg.norm(info.object_xy - info.goal_xy))
-    return -distance
+    return self._default_reward_fn(info)
 
   def _check_done(self, info: StepInfo) -> tuple[bool, bool]:
     """Return ``(terminated, truncated)`` per gym convention.

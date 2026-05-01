@@ -49,7 +49,13 @@ class EpisodeProcessor(Protocol):
 
 
 def _slice_step_info(raw: RawEpisode, n: int) -> dict[str, np.ndarray]:
-  """Extract per-step info columns sliced to length ``n``."""
+  """Extract per-step info columns sliced to length ``n``.
+
+  In the recorded format, ``step_info[t]`` describes the state AFTER
+  action_t — i.e. it aligns with the buffer's ``reward[t]`` (reward
+  earned by taking ``action_t``). Callers pass ``n = T = N - 1`` so the
+  result aligns with the action/reward/done axis.
+  """
   out: dict[str, np.ndarray] = {}
   for key in _STEP_INFO_KEYS:
     out[key] = np.asarray(raw[key], dtype=np.float32)[:n]
@@ -93,7 +99,7 @@ def _drop_last_and_pack(obs: np.ndarray, raw: RawEpisode) -> Episode:
     "action": action,
     "reward": reward,
     "done": done,
-    "step_info": _slice_step_info(raw, N),
+    "step_info": _slice_step_info(raw, N - 1),
   }
   if goal_xy is not None:
     ep["goal_xy"] = goal_xy
@@ -152,7 +158,7 @@ class ImageProprioProcessor:
       "action": action,
       "reward": reward,
       "done": done,
-      "step_info": _slice_step_info(raw, N),
+      "step_info": _slice_step_info(raw, N - 1),
     }
     if "goal_xy" in raw:
       ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)

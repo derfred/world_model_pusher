@@ -89,3 +89,6 @@ sim:
 env:
   obs_mode: "state"   # "state" | "image" | "image_proprio"
   act_mode: "ee"      # "joint" | "ee"
+
+reward:
+  kind: "goal_distance"

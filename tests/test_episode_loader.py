@@ -79,8 +79,9 @@ def test_drop_last_and_pack_enforces_buffer_invariants():
   assert ep["done"].shape == (N - 1,)
   assert ep["done"][-1]
   assert not ep["done"][:-1].any()
-  # step_info columns are present and length-N (matches obs).
-  assert ep["step_info"]["object_xy"].shape == (N, 2)
+  # step_info columns align with reward (T = N-1): step_info[t] is the
+  # post-action info matching reward[t].
+  assert ep["step_info"]["object_xy"].shape == (N - 1, 2)
 
 
 def test_drop_last_rejects_single_step_episode():

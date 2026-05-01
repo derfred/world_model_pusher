@@ -2,9 +2,11 @@ import logging
 import os
 from collections import defaultdict
 
+from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
 
+from .training.episode_loader import processor_for
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
 
@@ -15,13 +17,17 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
   def __init__(self, config):
-    self.config         = config
+    self.config = config
+    self.env    = PushingEnv(config)
+
     self._replay_buffer = ReplayBuffer(
       capacity_steps=config.data.buffer_size,
       min_episode_len=config.training.min_episode_len,
+      processor=processor_for(self.env.obs_mode),
+      reward_fn=build_reward_fn(config.reward),
       seed=config.seed,
     )
-    self.env    = PushingEnv(config)
+
     self.model  = build_model(config, obs_dim=15, action_dim=6)
     self.policy = DreamerPolicy(self.model)
     self.collector = EpisodeCollector(self.env, self.policy)
