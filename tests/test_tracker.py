@@ -89,6 +89,42 @@ def test_payload_overrides_context_on_key_conflict(calls):
 
 
 # ---------------------------------------------------------------------------
+# Scope (context manager)
+# ---------------------------------------------------------------------------
+
+
+def test_scope_yields_child_tracker_with_parent():
+  root = _make_root()
+  with root.scope({"phase": "train"}) as child:
+    assert isinstance(child, Tracker)
+    assert child._parent is root
+    assert child.data == {"phase": "train"}
+
+
+def test_scope_child_log_merges_context_into_payload(calls):
+  root = _make_root()
+  with root.scope({"phase": "train", "epoch": 3}) as child:
+    child.log({"loss": 0.42})
+
+  assert calls == [{"phase": "train", "epoch": 3, "loss": 0.42}]
+
+
+def test_scope_supports_nested_derive(calls):
+  root = _make_root()
+  with root.scope({"phase": "train"}) as scoped:
+    scoped.derive({"epoch": 1}).log({"loss": 0.5})
+
+  assert calls == [{"phase": "train", "epoch": 1, "loss": 0.5}]
+
+
+def test_scope_propagates_exceptions():
+  root = _make_root()
+  with pytest.raises(RuntimeError, match="boom"):
+    with root.scope({"phase": "train"}):
+      raise RuntimeError("boom")
+
+
+# ---------------------------------------------------------------------------
 # Nested derive
 # ---------------------------------------------------------------------------
 

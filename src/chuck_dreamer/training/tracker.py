@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+
+
 class Tracker:
   def __init__(self, config, data={}, parent=None):
     self.config  = config
@@ -28,3 +31,7 @@ class Tracker:
 
   def derive(self, data: dict):
     return Tracker(self.config, data=data, parent=self)
+
+  @contextmanager
+  def scope(self, data: dict):
+    yield self.derive(data)

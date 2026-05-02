@@ -54,19 +54,23 @@ class Trainer:
       collect_data[outcome] += 1
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)
-    logger.info(f"Collect phase: collected {self.config.training.num_collect_episodes} episodes with outcomes: {dict(collect_data)}")
+    self.tracker.derive({"phase": "collect"}).log({
+      "num_episodes": self.config.training.num_collect_episodes,
+      **{f"outcome/{k}": v for k, v in collect_data.items()},
+    })
 
   def _train_phase(self):
-    print("starting train phase with replay buffer size:", len(self._replay_buffer))
-    if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
-      logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
-      return
+    with self.tracker.scope({"phase": "train"}) as tracker:
+      tracker.log({"replay_buffer_size": len(self._replay_buffer)})
+      if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
+        logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
+        return
 
-    for epoch in range(self.config.training.num_gradient_steps):
-      batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
+      for epoch in range(self.config.training.num_gradient_steps):
+        batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
 
-      # get the world model predictions for this batch
-      self.model.wm_update(batch, tracker=self.tracker.derive({"phase": "train", "epoch": epoch}))
+        # get the world model predictions for this batch
+        self.model.wm_update(batch, tracker=tracker.derive({"epoch": epoch}))
 
   def _eval_phase(self):
     pass
