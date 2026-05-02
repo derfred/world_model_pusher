@@ -8,6 +8,7 @@ for training models, processing data, and running experiments.
 
 import click
 import logging
+from pathlib import Path
 
 import numpy as np
 from omegaconf import DictConfig
@@ -180,6 +181,94 @@ def train(ctx, warmup_path, seed, resume):
   trainer = Trainer(cfg)
   resume_arg: bool | str = True if resume == "__auto__" else (resume or False)
   trainer.train(resume=resume_arg)
+
+
+def _list_evals() -> dict[str, Path]:
+  """Return a mapping of eval-name → notebook path under chuck_dreamer/evals/."""
+  evals_dir = Path(__file__).parent / "src" / "chuck_dreamer" / "evals"
+  return {p.stem: p for p in sorted(evals_dir.glob("*.ipynb"))}
+
+
+@cli.command("eval")
+@click.argument("name", required=False)
+@click.option("--checkpoint", "checkpoint_path", default=None, type=str,
+              help="Path to a trained checkpoint .safetensors file. "
+                   "Defaults to {save_dir}/{experiment}/latest.safetensors.")
+@click.option("--data-path", default=None, type=str, help="Directory of evaluation episodes (default: cfg.data.warmup_path).")
+@click.option("--data-format", default=None, type=click.Choice(["hdf5", "rerun"]),
+              help="Episode format on disk (default: cfg.data.warmup_format).")
+@click.option("--num-episodes", default=20, type=int, help="Number of episodes to evaluate on.")
+@click.option("--burn-in", default=5, type=int, help="Closed-loop burn-in steps before open-loop rollout.")
+@click.option("--horizon", default=15, type=int, help="Open-loop horizon length.")
+@click.option("--seed", default=None, type=int, help="Random seed (random if omitted).")
+@click.option("--output", "output_path", default=None, type=str,
+              help="Where to write the executed notebook (default: ./<name>_<ckpt-stem>.ipynb in cwd).")
+@click.option("-p", "--param", "extra_params", multiple=True, metavar="KEY=VALUE",
+              help="Additional papermill parameter override (repeatable).")
+@click.pass_context
+def eval_cmd(ctx, name, checkpoint_path, data_path, data_format, num_episodes,
+             burn_in, horizon, seed, output_path, extra_params):
+  """Run an evaluation notebook on a trained checkpoint via papermill.
+
+  NAME selects which notebook under ``src/chuck_dreamer/evals/`` to execute
+  (e.g. ``open_loop_rollout``). Run without NAME to list available evals.
+  """
+  import os
+
+  evals = _list_evals()
+  if not name:
+    click.echo("Available evals:")
+    for n, p in evals.items():
+      click.echo(f"  {n:<30s} {p}")
+    return
+  if name not in evals:
+    raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
+  nb_in = evals[name]
+
+  cfg = _resolve_cfg(ctx, {"seed": seed})
+
+  if checkpoint_path is None:
+    experiment = cfg.logging.experiment_name or "default"
+    checkpoint_path = os.path.join(cfg.logging.save_dir, experiment, "latest.safetensors")
+  if not Path(checkpoint_path).exists():
+    raise click.ClickException(f"checkpoint not found: {checkpoint_path}")
+
+  if data_path is None:
+    data_path = cfg.data.warmup_path
+  if data_format is None:
+    data_format = cfg.data.warmup_format
+
+  if output_path is None:
+    output_path = f"{name}_{Path(checkpoint_path).stem}.ipynb"
+  else:
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+  parameters: dict = {
+    "checkpoint_path": str(checkpoint_path),
+    "data_path":       str(data_path),
+    "data_format":     str(data_format),
+    "num_episodes":    int(num_episodes),
+    "burn_in":         int(burn_in),
+    "horizon":         int(horizon),
+    "seed":            int(cfg.seed),
+  }
+  for kv in extra_params:
+    if "=" not in kv:
+      raise click.BadParameter(f"--param expects KEY=VALUE, got {kv!r}")
+    k, v = kv.split("=", 1)
+    parameters[k.strip()] = v
+
+  click.echo(f"Executing {nb_in} → {output_path}")
+  click.echo(f"Parameters: {parameters}")
+
+  import papermill as pm
+  pm.execute_notebook(
+    input_path=str(nb_in),
+    output_path=str(output_path),
+    parameters=parameters,
+    cwd=str(Path(__file__).parent),
+  )
+  click.echo(f"Done. Executed notebook: {output_path}")
 
 
 if __name__ == "__main__":
