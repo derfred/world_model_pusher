@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 
 from chuck_dreamer.sim import (
     CameraConfig,
+    EpisodeCollector,
     EpisodeWriter,
     LightingConfig,
     ObjectConfig,
@@ -21,6 +22,7 @@ from chuck_dreamer.sim import (
     SceneConfig,
     SceneGenerator,
 )
+from chuck_dreamer.sim.step_info import StepInfo
 
 
 # ---------------------------------------------------------------------------
@@ -730,9 +732,6 @@ class TestScriptedPolicy:
 # ---------------------------------------------------------------------------
 # EpisodeCollector tests (fake env + fake policy — no MuJoCo)
 # ---------------------------------------------------------------------------
-
-from chuck_dreamer.sim import EpisodeCollector
-from chuck_dreamer.sim.step_info import StepInfo
 
 
 def _fake_obs(step: int, n_joints: int = 6):

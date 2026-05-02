@@ -466,8 +466,11 @@ class DreamerMLXModel:
       opt_wm     = take("opt_wm")
       opt_actor  = take("opt_actor")
       opt_critic = take("opt_critic")
-      if opt_wm:     self._opt_wm.state     = tree_unflatten(opt_wm)
-      if opt_actor:  self._opt_actor.state  = tree_unflatten(opt_actor)
-      if opt_critic: self._opt_critic.state = tree_unflatten(opt_critic)
+      if opt_wm:
+        self._opt_wm.state = tree_unflatten(opt_wm)
+      if opt_actor:
+        self._opt_actor.state = tree_unflatten(opt_actor)
+      if opt_critic:
+        self._opt_critic.state = tree_unflatten(opt_critic)
 
     mx.eval(self.actor.parameters(), self.critic.parameters(), wm_bundle.parameters())
