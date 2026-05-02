@@ -71,10 +71,39 @@ class Trainer:
   def _eval_phase(self):
     pass
 
-  def _checkpoint(self):
-    pass
+  def _checkpoint_dir(self) -> str:
+    name = self.config.logging.experiment_name or "default"
+    return os.path.join(self.config.logging.save_dir, name)
 
-  def train(self):
+  def _resume(self, resume: bool | str):
+    """Load weights before training. ``resume`` may be:
+      - False/None: no-op
+      - True:       load ``{checkpoint_dir}/latest.safetensors`` if present
+      - str path:   load that exact file
+    """
+    if not resume:
+      return
+    if resume is True:
+      path = os.path.join(self._checkpoint_dir(), "latest.safetensors")
+    else:
+      path = resume
+    if not os.path.exists(path):
+      logger.warning(f"Resume requested but {path} does not exist; starting from scratch.")
+      return
+    logger.info(f"Resuming from {path}")
+    self.model.load(path)
+
+  def _checkpoint(self, step: int):
+    ckpt_dir = self._checkpoint_dir()
+    os.makedirs(ckpt_dir, exist_ok=True)
+    step_path   = os.path.join(ckpt_dir, f"step_{step:06d}.safetensors")
+    latest_path = os.path.join(ckpt_dir, "latest.safetensors")
+    self.model.save(step_path)
+    self.model.save(latest_path)
+    logger.info(f"Saved checkpoint to {step_path}")
+
+  def train(self, resume: bool | str = False):
+    self._resume(resume)
     self._warmup()
     for i in range(self.config.training.num_iterations):
       self._collect_phase()
@@ -82,7 +111,12 @@ class Trainer:
       if i % self.config.training.eval_every == 0:
         self._eval_phase()
       if i % self.config.training.save_every == 0:
-        self._checkpoint()
+        self._checkpoint(i)
+
+    final_path = os.path.join(self._checkpoint_dir(), "final.safetensors")
+    os.makedirs(self._checkpoint_dir(), exist_ok=True)
+    self.model.save(final_path)
+    logger.info(f"Saved final checkpoint to {final_path}")
 
 
 if __name__ == "__main__":

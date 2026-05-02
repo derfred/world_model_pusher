@@ -167,15 +167,19 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 @cli.command("train")
 @click.option("--warmup_path", default=None, type=str, help="Path to warmup episodes")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
+@click.option("--resume", "resume", default=None, is_flag=False, flag_value="__auto__",
+              help="Resume from a checkpoint. Bare flag uses {save_dir}/{experiment}/latest.safetensors; "
+                   "pass a path to load a specific file.")
 @click.pass_context
-def train(ctx, warmup_path, seed):
+def train(ctx, warmup_path, seed, resume):
   """Train a model using the specified configuration."""
   from chuck_dreamer.trainer import Trainer
 
   cfg = _resolve_cfg(ctx, {"seed": seed, "data": {"warmup_path": warmup_path}})
   click.echo(f"Training with config: {cfg}")
   trainer = Trainer(cfg)
-  trainer.train()
+  resume_arg: bool | str = True if resume == "__auto__" else (resume or False)
+  trainer.train(resume=resume_arg)
 
 
 if __name__ == "__main__":

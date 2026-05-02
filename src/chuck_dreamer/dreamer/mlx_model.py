@@ -1,8 +1,10 @@
+import os
 from typing import cast
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from mlx.utils import tree_flatten, tree_unflatten
 
 
 # Helpers
@@ -419,3 +421,53 @@ class DreamerMLXModel:
       tracker.log(logs)
 
     return aux["post_states"]
+
+  def save(self, path: str) -> None:
+    """Save model weights (and optimizer state during training) to ``path``.
+
+    Writes a single ``.safetensors`` file containing flat keys for the
+    world-model bundle, actor, and critic. When ``training`` is True the
+    Adam optimizer states are written alongside.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    def flat(prefix, tree):
+      return {f"{prefix}.{k}": v for k, v in tree_flatten(tree)}
+
+    weights: dict = {}
+    weights.update(flat("wm",     self._wm_bundle.parameters()) if self.training
+                   else flat("wm", _WMBundle(self.encoder, self.rssm, self.decoder, self.reward_head).parameters()))
+    weights.update(flat("actor",  self.actor.parameters()))
+    weights.update(flat("critic", self.critic.parameters()))
+
+    if self.training:
+      weights.update(flat("opt_wm",     self._opt_wm.state))
+      weights.update(flat("opt_actor",  self._opt_actor.state))
+      weights.update(flat("opt_critic", self._opt_critic.state))
+
+    mx.save_safetensors(path, weights)
+
+  def load(self, path: str) -> None:
+    """Load weights previously written by :meth:`save`."""
+    flat_weights = mx.load(path)
+
+    def take(prefix):
+      plen = len(prefix) + 1
+      return [(k[plen:], v) for k, v in flat_weights.items() if k.startswith(prefix + ".")]
+
+    wm_bundle = self._wm_bundle if self.training else _WMBundle(
+      self.encoder, self.rssm, self.decoder, self.reward_head
+    )
+    wm_bundle.update(tree_unflatten(take("wm")))
+    self.actor.update(tree_unflatten(take("actor")))
+    self.critic.update(tree_unflatten(take("critic")))
+
+    if self.training:
+      opt_wm     = take("opt_wm")
+      opt_actor  = take("opt_actor")
+      opt_critic = take("opt_critic")
+      if opt_wm:     self._opt_wm.state     = tree_unflatten(opt_wm)
+      if opt_actor:  self._opt_actor.state  = tree_unflatten(opt_actor)
+      if opt_critic: self._opt_critic.state = tree_unflatten(opt_critic)
+
+    mx.eval(self.actor.parameters(), self.critic.parameters(), wm_bundle.parameters())
