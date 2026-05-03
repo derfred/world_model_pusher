@@ -143,7 +143,7 @@ class SceneGenerator:
     self.table_size = [float(v) for v in config.sim.table_size]
 
   @property
-  def robot_type(self) -> str:
+  def robot_type(self) -> Any:
     return self._preset["robot_type"]
 
   @property
