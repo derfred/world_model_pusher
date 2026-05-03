@@ -16,14 +16,19 @@ from chuck_dreamer.config import load_config  # noqa: E402
 from chuck_dreamer.dreamer import build_model  # noqa: E402
 from chuck_dreamer.dreamer.mlx_model import (  # noqa: E402
   Actor,
+  CNNDecoder,
+  CNNEncoder,
   Critic,
   DreamerMLXModel,
+  ImageProprioDecoder,
+  ImageProprioEncoder,
   MLPDecoder,
   MLPEncoder,
   RewardHead,
   RSSM,
   feat,
 )
+from chuck_dreamer.config import derive_image_size  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +224,7 @@ def test_actor_initial_std_uses_init_std_offset():
 
 def test_dreamer_model_builds_from_default_config():
   cfg = load_config()
+  cfg.env.obs_mode = "state"
   model = build_model(cfg, obs_shape=(15,), action_dim=6)
   assert isinstance(model, DreamerMLXModel)
   assert isinstance(model.encoder, MLPEncoder)
@@ -231,6 +237,7 @@ def test_dreamer_model_builds_from_default_config():
 
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = load_config()
+  cfg.env.obs_mode = "state"
   B, T, obs_dim, action_dim = 2, 4, 15, 6
   model = build_model(cfg, obs_shape=(obs_dim,), action_dim=action_dim)
 
@@ -261,6 +268,7 @@ def test_dreamer_model_end_to_end_forward_shapes():
 
 def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
   cfg = load_config()
+  cfg.env.obs_mode = "state"
   model = build_model(cfg, obs_shape=(15,), action_dim=6)
 
   init = model.rssm.initial_state(batch_size=3)
@@ -278,13 +286,136 @@ def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
 
 def test_dreamer_model_rejects_unsupported_obs_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "image"  # CNN encoder/decoder not yet implemented
-  with pytest.raises(NotImplementedError):
+  cfg.env.obs_mode = "depth"  # not in {state, image, image_proprio}
+  with pytest.raises(ValueError):
     build_model(cfg, obs_shape=(64, 64, 3), action_dim=7)
 
 
 def test_build_model_rejects_unknown_device():
   cfg = load_config()
+  cfg.env.obs_mode = "state"
   cfg.hardware.device = "cuda"
   with pytest.raises(ValueError):
     build_model(cfg, obs_shape=(15,), action_dim=6)
+
+
+# ---------------------------------------------------------------------------
+# CNN encoder / decoder shapes
+# ---------------------------------------------------------------------------
+
+
+def test_cnn_encoder_output_shape_uint8_input():
+  strides = (2, 2, 2, 2)
+  img = derive_image_size(strides)  # 64
+  enc = CNNEncoder(in_channels=3, channels=(32, 64, 128, 256),
+                   kernels=(4, 4, 4, 4), strides=strides,
+                   embed_dim=200, image_size=img)
+  x = mx.zeros((2, 5, img, img, 3), dtype=mx.uint8)
+  assert enc(x).shape == (2, 5, 200)
+
+
+def test_cnn_decoder_recovers_image_shape():
+  strides = (2, 2, 2, 2)
+  img = derive_image_size(strides)
+  dec = CNNDecoder(feat_dim=230, channels=(32, 64, 128, 256),
+                   kernels=(4, 4, 4, 4), strides=strides,
+                   out_channels=3, image_size=img)
+  f = mx.zeros((2, 5, 230))
+  out = dec(f)
+  assert out.shape == (2, 5, img, img, 3)
+
+
+def test_cnn_encoder_validates_unequal_lengths():
+  with pytest.raises(ValueError):
+    CNNEncoder(in_channels=3,
+               channels=(32, 64),
+               kernels=(4, 4, 4),  # mismatched length
+               strides=(2, 2),
+               embed_dim=10, image_size=16)
+
+
+def test_image_proprio_encoder_decoder_roundtrip_shapes():
+  strides = (2, 2)
+  img = derive_image_size(strides)
+  cnn_enc = CNNEncoder(in_channels=3, channels=(32, 64), kernels=(4, 4),
+                       strides=strides, embed_dim=64, image_size=img)
+  cnn_dec = CNNDecoder(feat_dim=80, channels=(32, 64), kernels=(4, 4),
+                       strides=strides, out_channels=3, image_size=img)
+  enc = ImageProprioEncoder(cnn_enc, proprio_dim=13, proprio_hidden=(64,), embed_dim=64)
+  dec = ImageProprioDecoder(feat_dim=80, cnn=cnn_dec, proprio_hidden=(64,), proprio_dim=13)
+
+  obs = {"image": mx.zeros((2, 3, img, img, 3), dtype=mx.uint8),
+         "proprio": mx.zeros((2, 3, 13))}
+  e = enc(obs)
+  assert e.shape == (2, 3, 64)
+
+  out = dec(mx.zeros((2, 3, 80)))
+  assert out["image"].shape == (2, 3, img, img, 3)
+  assert out["proprio"].shape == (2, 3, 13)
+
+
+# ---------------------------------------------------------------------------
+# DreamerMLXModel: image / image_proprio modes
+# ---------------------------------------------------------------------------
+
+
+def test_dreamer_model_builds_image_mode():
+  cfg = load_config()
+  cfg.env.obs_mode = "image"
+  img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
+  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  assert isinstance(model, DreamerMLXModel)
+  assert model.obs_mode == "image"
+  assert model.image_size == img
+  assert isinstance(model.encoder, CNNEncoder)
+  assert isinstance(model.decoder, CNNDecoder)
+
+
+def test_dreamer_model_builds_image_proprio_mode():
+  cfg = load_config()
+  cfg.env.obs_mode = "image_proprio"
+  img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
+  model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (13,)}, action_dim=6)
+  assert model.obs_mode == "image_proprio"
+  assert model.image_size == img
+  assert model.proprio_dim == 13
+  assert isinstance(model.encoder, ImageProprioEncoder)
+  assert isinstance(model.decoder, ImageProprioDecoder)
+
+
+def test_dreamer_image_recon_loss_handles_uint8_obs():
+  cfg = load_config()
+  cfg.env.obs_mode = "image"
+  img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
+  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  recon = mx.zeros((2, 3, img, img, 3))
+  obs   = mx.zeros((2, 3, img, img, 3), dtype=mx.uint8)
+  loss = model._recon_loss(recon, obs)
+  # uint8 zeros normalize to -0.5; recon=0 makes per-pixel error 0.5.
+  expected = 0.25 * img * img * 3
+  assert abs(float(loss.item()) - expected) < 1e-3
+
+
+def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
+  cfg = load_config()
+  cfg.env.obs_mode = "image_proprio"
+  img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
+  model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (4,)}, action_dim=6)
+  recon = {"image":   mx.zeros((2, 3, img, img, 3)),
+           "proprio": mx.zeros((2, 3, 4))}
+  obs   = {"image":   mx.zeros((2, 3, img, img, 3), dtype=mx.uint8),
+           "proprio": mx.ones((2, 3, 4))}
+  loss = model._recon_loss(recon, obs)
+  expected_img = 0.25 * img * img * 3
+  expected_pro = 4.0  # ((0 - 1)**2).sum(-1) == 4 per (b,t), mean over (B,T) = 4.
+  assert abs(float(loss.item()) - (expected_img + expected_pro)) < 1e-3
+
+
+def test_dreamer_state_recon_loss_unchanged():
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  recon = mx.zeros((2, 3, 5))
+  obs   = mx.ones((2, 3, 5))
+  loss = model._recon_loss(recon, obs)
+  assert abs(float(loss.item()) - 5.0) < 1e-6  # 5 dims, all (0-1)^2 = 1, summed.

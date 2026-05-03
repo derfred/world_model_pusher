@@ -276,3 +276,100 @@ def test_episode_sampling_is_length_proportional():
   # Expected ratio: (1000-9) / (100-9) ≈ 10.89. Allow generous tolerance.
   ratio = long_count / max(short_count, 1)
   assert 7.0 < ratio < 15.0, f"ratio={ratio} long={long_count} short={short_count}"
+
+
+# ---------------------------------------------------------------------------
+# Dict (image_proprio) obs support
+# ---------------------------------------------------------------------------
+
+
+def _make_image_proprio_episode(
+  episode_id: int,
+  length: int,
+  image_size: int = 8,
+  proprio_dim: int = 13,
+) -> dict:
+  """Episode whose obs is a dict {'image': uint8, 'proprio': float32}.
+
+  The image is filled with a constant per timestep so we can later check
+  that sampled sequences stay contiguous within an episode.
+  """
+  T = length
+  # Image fill values stay in [0, 255] (uint8), so use modulo. The sequence
+  # contiguity check uses the proprio channel below; the image is only here
+  # to exercise the dict-obs round-trip.
+  images = np.stack([
+    np.full((image_size, image_size, 3), (episode_id * 100 + t) % 256, dtype=np.uint8)
+    for t in range(T + 1)
+  ])
+  proprio = np.zeros((T + 1, proprio_dim), dtype=np.float32)
+  for t in range(T + 1):
+    proprio[t, 0] = episode_id * 1000 + t
+  action = np.full((T, 2), float(episode_id), dtype=np.float32)
+  reward = np.arange(T, dtype=np.float32)
+  done = np.zeros((T,), dtype=bool)
+  done[-1] = True
+  return {
+    "obs": {"image": images, "proprio": proprio},
+    "action": action,
+    "reward": reward,
+    "done": done,
+  }
+
+
+def test_dict_obs_round_trips_through_buffer():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_image_proprio_episode(episode_id=0, length=20))
+
+  ep = buf._episodes[0]
+  assert isinstance(ep["obs"], dict)
+  assert ep["obs"]["image"].dtype == np.uint8
+  assert ep["obs"]["image"].shape == (21, 8, 8, 3)
+  assert ep["obs"]["proprio"].shape == (21, 13)
+
+
+def test_dict_obs_sample_yields_dict_batch_with_correct_shapes():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  for ep_id in range(3):
+    buf.add_episode(_make_image_proprio_episode(ep_id, length=30))
+
+  batch = buf.sample(batch_size=4, seq_len=10)
+  assert isinstance(batch["obs"], dict)
+  img = np.asarray(batch["obs"]["image"])
+  pro = np.asarray(batch["obs"]["proprio"])
+  assert img.shape == (4, 10, 8, 8, 3)
+  assert pro.shape == (4, 10, 13)
+  # Image dtype survives the round trip.
+  assert img.dtype == np.uint8
+
+
+def test_dict_obs_sampled_sequences_stay_within_episode():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
+  for ep_id in range(5):
+    buf.add_episode(_make_image_proprio_episode(ep_id, length=30))
+
+  batch = buf.sample(batch_size=16, seq_len=10)
+  pro = np.asarray(batch["obs"]["proprio"])  # (B, T, P)
+  for b in range(pro.shape[0]):
+    seq = pro[b, :, 0]
+    ep_ids = np.floor(seq / 1000).astype(int)
+    assert np.all(ep_ids == ep_ids[0]), f"cross-episode: {seq}"
+    within = seq - ep_ids * 1000
+    diffs = np.diff(within)
+    assert np.all(diffs == 1), f"non-contiguous within episode: {seq}"
+
+
+def test_dict_obs_rejects_mismatched_leaf_lengths():
+  T = 10
+  ep = {
+    "obs": {
+      "image":   np.zeros((T + 1, 4, 4, 3), dtype=np.uint8),
+      "proprio": np.zeros((T,    13),        dtype=np.float32),  # WRONG: T not T+1
+    },
+    "action": np.zeros((T, 2), dtype=np.float32),
+    "reward": np.zeros((T,),   dtype=np.float32),
+    "done":   np.array([False] * (T - 1) + [True]),
+  }
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  with pytest.raises(ValueError):
+    buf.add_episode(ep)

@@ -1,21 +1,19 @@
-"""Load sim-collected episodes into the replay buffer.
+"""Read sim-recorded episodes from disk into raw ``RawEpisode`` dicts.
 
 Episodes recorded by :class:`HDF5EpisodeWriter`/:class:`RerunEpisodeWriter`
 carry one of ``joint_action`` / ``ee_action`` (selected by ``act_mode``
 in metadata), the achieved arm qpos and EE pose per step, and the
 object/goal state needed to recompute reward at training time.
 
-The buffer's schema is ``(obs, action, reward, done)`` plus a
-``step_info`` block that mirrors :class:`StepInfo`. This module bridges
-the two: a small processor abstraction extracts the modal observation;
-the last step is dropped so the obs count is T+1 for T actions,
-preserving the buffer's invariant.
+This module reads those formats into a flat dict of stacked arrays.
+Conversion to the replay buffer's ``(obs, action, reward, done)`` schema
+is done by the processors in :mod:`.episode_processor`.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol, Union
+from typing import Any, Callable, Iterator, Union
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
@@ -26,154 +24,6 @@ Progress = Union[bool, ProgressCallback]
 
 
 RawEpisode = dict[str, Any]
-Episode = dict[str, Any]
-
-
-_STEP_INFO_KEYS = ("object_xy", "ee_pos", "ee_quat")
-
-
-# ---------------------------------------------------------------------------
-# Processor abstraction
-# ---------------------------------------------------------------------------
-
-
-class EpisodeProcessor(Protocol):
-  """Converts a raw sim episode into replay-buffer schema.
-
-  A processor must return a dict with keys ``obs`` (T+1, *obs_shape),
-  ``action`` (T, action_dim), ``reward`` (T,), ``done`` (T,), and
-  ``step_info`` (a dict of T+1-length arrays mirroring StepInfo columns).
-  """
-
-  def __call__(self, raw: RawEpisode) -> Episode: ...
-
-
-def _slice_step_info(raw: RawEpisode, n: int) -> dict[str, np.ndarray]:
-  """Extract per-step info columns sliced to length ``n``.
-
-  In the recorded format, ``step_info[t]`` describes the state AFTER
-  action_t — i.e. it aligns with the buffer's ``reward[t]`` (reward
-  earned by taking ``action_t``). Callers pass ``n = T = N - 1`` so the
-  result aligns with the action/reward/done axis.
-  """
-  out: dict[str, np.ndarray] = {}
-  for key in _STEP_INFO_KEYS:
-    out[key] = np.asarray(raw[key], dtype=np.float32)[:n]
-  if "timestamp" in raw:
-    out["time"] = np.asarray(raw["timestamp"], dtype=np.float32)[:n]
-  return out
-
-
-def _resolve_action(raw: RawEpisode) -> np.ndarray:
-  if "joint_action" in raw:
-    return np.asarray(raw["joint_action"], dtype=np.float32)
-  if "ee_action" in raw:
-    return np.asarray(raw["ee_action"], dtype=np.float32)
-  raise KeyError("raw episode missing an action field (joint_action / ee_action)")
-
-
-def _drop_last_and_pack(obs: np.ndarray, raw: RawEpisode) -> Episode:
-  """Align a per-step obs array with the buffer's (T+1 obs, T action) layout.
-
-  Sim episodes record N aligned steps of (obs_t, action_t, reward_t).
-  We treat the N recorded obs as ``obs[0..N-1]`` and drop the last
-  action/reward, yielding N obs and N-1 actions — i.e. T = N-1 with
-  T+1 = N obs. The final ``done`` is set to True. ``step_info`` is
-  sliced to length N (matching obs).
-  """
-  N = obs.shape[0]
-  if N < 2:
-    raise ValueError(f"episode too short: {N} steps (need >= 2)")
-
-  action = _resolve_action(raw)[: N - 1]
-  reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
-  done = np.zeros((N - 1,), dtype=bool)
-  done[-1] = True
-
-  goal_xy = None
-  if "goal_xy" in raw:
-    goal_xy = np.asarray(raw["goal_xy"], dtype=np.float32)
-
-  ep: Episode = {
-    "obs": obs.astype(obs.dtype, copy=False),
-    "action": action,
-    "reward": reward,
-    "done": done,
-    "step_info": _slice_step_info(raw, N - 1),
-  }
-  if goal_xy is not None:
-    ep["goal_xy"] = goal_xy
-  return ep
-
-
-class StateVectorProcessor:
-  """Default processor: concat ee_pos + ee_quat + object_xy + joint_qpos.
-
-  Produces a flat float32 observation vector per step. Order is fixed
-  so downstream consumers can unpack it consistently.
-  """
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
-    ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
-    object_xy = np.asarray(raw["object_xy"], dtype=np.float32)
-    joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    obs = np.concatenate([ee_pos, ee_quat, object_xy, joint_qpos], axis=1)
-    return _drop_last_and_pack(obs, raw)
-
-
-class ImageProcessor:
-  """Processor that uses the raw RGB image as the observation (uint8)."""
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    obs = np.asarray(raw["image"], dtype=np.uint8)
-    return _drop_last_and_pack(obs, raw)
-
-
-class ImageProprioProcessor:
-  """Returns (image, proprio) per step.
-
-  proprio = ee_pos (3) + ee_quat (4) + joint_qpos (n_joints).
-  No object_xy: proprioception is body-internal.
-  """
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    image = np.asarray(raw["image"], dtype=np.uint8)
-    ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
-    ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
-    joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    proprio = np.concatenate([ee_pos, ee_quat, joint_qpos], axis=1)
-
-    N = image.shape[0]
-    if N < 2:
-      raise ValueError(f"episode too short: {N} steps (need >= 2)")
-
-    action = _resolve_action(raw)[: N - 1]
-    reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
-    done = np.zeros((N - 1,), dtype=bool)
-    done[-1] = True
-
-    ep: Episode = {
-      "obs": (image, proprio),
-      "action": action,
-      "reward": reward,
-      "done": done,
-      "step_info": _slice_step_info(raw, N - 1),
-    }
-    if "goal_xy" in raw:
-      ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
-    return ep
-
-
-def processor_for(obs_mode: str) -> EpisodeProcessor:
-  """Build the processor matching a given env ``obs_mode``."""
-  if obs_mode == "state":
-    return StateVectorProcessor()
-  if obs_mode == "image":
-    return ImageProcessor()
-  if obs_mode == "image_proprio":
-    return ImageProprioProcessor()
-  raise ValueError(f"Unknown obs_mode: {obs_mode!r}")
 
 
 # ---------------------------------------------------------------------------

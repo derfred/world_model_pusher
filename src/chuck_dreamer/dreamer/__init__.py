@@ -5,7 +5,9 @@ from .policy import DreamerPolicy
 from .mlx_model import DreamerMLXModel
 
 
-def build_model(config, obs_shape: tuple[int, ...], action_dim: int):
+def build_model(config, obs_shape, action_dim: int):
+  """Build the Dreamer model. ``obs_shape`` may be a tuple (state/image)
+  or a dict with ``image``/``proprio`` keys (image_proprio)."""
   if config.hardware.device == "mlx":
     return DreamerMLXModel(config, obs_shape=obs_shape, action_dim=action_dim)
   else:
@@ -14,5 +16,5 @@ def build_model(config, obs_shape: tuple[int, ...], action_dim: int):
 
 __all__ = [
   "build_model",
-  "DreamerPolicy"
+  "DreamerPolicy",
 ]

@@ -78,16 +78,20 @@ class SceneConfig:
 
     @property
     def joint_names(self) -> list[str]:
-        if self.robot_type == "stick":
-            return ["joint1"]
-        elif self.robot_type == "so100":
-            return ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
-        else:
-            raise ValueError(f"Unknown robot type: {self.robot_type}")
+        return joint_names_for_robot(self.robot_type)
 
     @property
     def actuator_names(self) -> list[str]:
         return self.joint_names
+
+
+def joint_names_for_robot(robot_type: str) -> list[str]:
+    """Joint names defined by the robot model — independent of any sampled scene."""
+    if robot_type == "stick":
+        return ["joint1"]
+    if robot_type == "so100":
+        return ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+    raise ValueError(f"Unknown robot type: {robot_type}")
 
 
 def object_half_z(cfg: ObjectConfig) -> float:

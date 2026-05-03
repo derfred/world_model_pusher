@@ -5,6 +5,30 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_flatten, tree_unflatten
+from omegaconf import OmegaConf
+
+# Key under which the OmegaConf-serialized training config is stored in the
+# safetensors metadata block. Older checkpoints written before this change have
+# no metadata; load() and load_config_from_checkpoint() handle that case.
+CONFIG_METADATA_KEY = "config_yaml"
+
+
+def load_config_from_checkpoint(path: str):
+  """Read the embedded training config from a .safetensors checkpoint.
+
+  Returns the DictConfig that was saved alongside the weights, or ``None`` for
+  legacy checkpoints written before metadata was embedded. Callers that need
+  shape-affecting fields (env.obs_mode, env.act_mode, model.*) should use this
+  rather than re-reading the on-disk default config, which may have drifted.
+
+  The saved YAML is fully resolved (see :meth:`DreamerMLXModel.save`), so
+  this does not depend on any custom OmegaConf resolvers being registered.
+  """
+  _, metadata = mx.load(path, return_metadata=True)
+  yaml_str = metadata.get(CONFIG_METADATA_KEY)
+  if not yaml_str:
+    return None
+  return OmegaConf.create(yaml_str)
 
 
 # Helpers
@@ -80,6 +104,179 @@ class MLPDecoder(nn.Module):
 
   def __call__(self, feat_in: mx.array) -> mx.array:
     return cast(mx.array, self.net(feat_in))
+
+
+# ---------------------------------------------------------------------------
+# CNN encoder / decoder for image obs
+# ---------------------------------------------------------------------------
+
+
+def _same_pad(kernel: int, stride: int) -> int:
+  """Padding that makes a stride-2-style conv halve spatial dims cleanly.
+
+  For kernel=4 stride=2 this gives padding=1, for kernel=3 stride=1
+  padding=1, etc.: enough on each side that ``out = in / stride``.
+  """
+  return max(0, (kernel - stride) // 2)
+
+
+class CNNEncoder(nn.Module):
+  """Dreamer-style CNN over (H, W, 3) uint8 images.
+
+  Inputs may have arbitrary batch dims; they are flattened, run through
+  the conv stack in NHWC, then flattened to (..., embed_dim).
+  Inputs are normalized to ``[-0.5, 0.5]``.
+  """
+
+  def __init__(
+    self,
+    in_channels: int,
+    channels: tuple[int, ...],
+    kernels:  tuple[int, ...],
+    strides:  tuple[int, ...],
+    embed_dim: int,
+    image_size: int,
+  ):
+    super().__init__()
+    if not (len(channels) == len(kernels) == len(strides)):
+      raise ValueError(
+        f"CNNEncoder: channels/kernels/strides must have equal length; "
+        f"got {len(channels)}/{len(kernels)}/{len(strides)}"
+      )
+    self.image_size = image_size
+
+    convs: list[nn.Module] = []
+    prev = in_channels
+    for c, k, s in zip(channels, kernels, strides):
+      convs.append(nn.Conv2d(prev, c, kernel_size=k, stride=s, padding=_same_pad(k, s)))
+      convs.append(nn.ELU())
+      prev = c
+    self.convs = nn.Sequential(*convs)
+
+    # Spatial dim after the strided convs (with `_same_pad` choice above):
+    # each layer divides cleanly by its stride, so end side = image_size / prod(strides).
+    spatial = image_size
+    for s in strides:
+      spatial //= int(s)
+    self._flat_dim = prev * spatial * spatial
+    self.proj = nn.Linear(self._flat_dim, embed_dim)
+
+  def __call__(self, obs: mx.array) -> mx.array:
+    """obs: (..., H, W, 3) — uint8 or float. Returns (..., embed_dim)."""
+    x = obs.astype(mx.float32) / 255.0 - 0.5 if obs.dtype == mx.uint8 else obs
+    lead = x.shape[:-3]
+    H, W, C = x.shape[-3], x.shape[-2], x.shape[-1]
+    x = x.reshape((-1, H, W, C))
+    x = self.convs(x)
+    x = x.reshape((x.shape[0], -1))
+    x = self.proj(x)
+    return cast(mx.array, x.reshape((*lead, -1)))
+
+
+class CNNDecoder(nn.Module):
+  """Mirror of :class:`CNNEncoder`. Maps (..., feat_dim) -> (..., H, W, 3).
+
+  Output is in ``[-0.5, 0.5]`` (matching the encoder's normalization);
+  callers comparing against uint8 images should normalize the target the
+  same way.
+  """
+
+  def __init__(
+    self,
+    feat_dim: int,
+    channels: tuple[int, ...],   # encoder order, e.g. (32, 64, 128, 256)
+    kernels:  tuple[int, ...],
+    strides:  tuple[int, ...],
+    out_channels: int,
+    image_size: int,
+  ):
+    super().__init__()
+    if not (len(channels) == len(kernels) == len(strides)):
+      raise ValueError(
+        f"CNNDecoder: channels/kernels/strides must have equal length; "
+        f"got {len(channels)}/{len(kernels)}/{len(strides)}"
+      )
+    self.image_size = image_size
+
+    rev_channels = tuple(reversed(channels))
+    rev_kernels  = tuple(reversed(kernels))
+    rev_strides  = tuple(reversed(strides))
+
+    spatial = image_size
+    for s in strides:
+      spatial //= int(s)
+    self._init_spatial = spatial
+    self._init_channels = rev_channels[0]
+    self.proj = nn.Linear(feat_dim, self._init_channels * spatial * spatial)
+
+    deconvs: list[nn.Module] = []
+    prev = rev_channels[0]
+    # Build N-1 transposed-conv stages that step back through the encoder
+    # widths; the last stage outputs `out_channels` directly.
+    next_channels = list(rev_channels[1:]) + [out_channels]
+    for i, (c_out, k, s) in enumerate(zip(next_channels, rev_kernels, rev_strides)):
+      deconvs.append(
+        nn.ConvTranspose2d(prev, c_out, kernel_size=k, stride=s, padding=_same_pad(k, s))
+      )
+      if i < len(next_channels) - 1:
+        deconvs.append(nn.ELU())
+      prev = c_out
+    self.deconvs = nn.Sequential(*deconvs)
+
+  def __call__(self, feat_in: mx.array) -> mx.array:
+    lead = feat_in.shape[:-1]
+    x = self.proj(feat_in)
+    x = x.reshape((-1, self._init_spatial, self._init_spatial, self._init_channels))
+    x = self.deconvs(x)
+    H, W, C = x.shape[-3], x.shape[-2], x.shape[-1]
+    return cast(mx.array, x.reshape((*lead, H, W, C)))
+
+
+# ---------------------------------------------------------------------------
+# image_proprio: combine a CNN image branch with an MLP proprio branch
+# ---------------------------------------------------------------------------
+
+
+class ImageProprioEncoder(nn.Module):
+  """Concat CNN(image) and MLP(proprio) features, project to ``embed_dim``."""
+
+  def __init__(
+    self,
+    cnn: CNNEncoder,
+    proprio_dim: int,
+    proprio_hidden: tuple[int, ...],
+    embed_dim: int,
+  ):
+    super().__init__()
+    self.cnn = cnn
+    self.proprio_mlp = _mlp(proprio_dim, proprio_hidden, embed_dim)
+    self.fuse = nn.Linear(2 * embed_dim, embed_dim)
+
+  def __call__(self, obs: dict) -> mx.array:
+    img_feat = self.cnn(obs["image"])
+    pro_feat = self.proprio_mlp(obs["proprio"])
+    return cast(mx.array, self.fuse(mx.concatenate([img_feat, pro_feat], axis=-1)))
+
+
+class ImageProprioDecoder(nn.Module):
+  """Two-headed decoder: CNN reconstructs the image, MLP the proprio vector."""
+
+  def __init__(
+    self,
+    feat_dim: int,
+    cnn: CNNDecoder,
+    proprio_hidden: tuple[int, ...],
+    proprio_dim: int,
+  ):
+    super().__init__()
+    self.cnn = cnn
+    self.proprio_mlp = _mlp(feat_dim, proprio_hidden, proprio_dim)
+
+  def __call__(self, feat_in: mx.array) -> dict:
+    return {
+      "image":   self.cnn(feat_in),
+      "proprio": self.proprio_mlp(feat_in),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +503,7 @@ class Critic(nn.Module):
 
 class _WMBundle(nn.Module):
   """Helper class to bundle RSSM, decoder, and reward head for joint WM updates."""
-  def __init__(self, encoder: MLPEncoder, rssm: RSSM, decoder: MLPDecoder, reward: RewardHead):
+  def __init__(self, encoder: nn.Module, rssm: RSSM, decoder: nn.Module, reward: RewardHead):
     super().__init__()
     self.encoder = encoder
     self.rssm    = rssm
@@ -315,22 +512,71 @@ class _WMBundle(nn.Module):
 
 
 class DreamerMLXModel:
-  def __init__(self, config, obs_shape: tuple[int, ...], action_dim: int, training: bool = True):
+  encoder: nn.Module
+  decoder: nn.Module
+
+  def __init__(self, config, obs_shape, action_dim: int, training: bool = True):
     self.config   = config
     self.training = training
     feat_dim      = config.model.rssm.stoch_size + config.model.rssm.deter_size
 
     obs_mode = config.env.obs_mode
+    self.obs_mode = obs_mode
+
+    enc_hidden = tuple(config.model.encoder.mlp_hidden)
+    dec_hidden = tuple(config.model.decoder.mlp_hidden)
+    embed_size = int(config.model.encoder.embed_size)
+
     if obs_mode == "state":
-      if len(obs_shape) != 1:
+      if not (isinstance(obs_shape, tuple) and len(obs_shape) == 1):
         raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
-      obs_dim = obs_shape[0]
-      self.encoder = MLPEncoder(obs_dim, tuple(config.model.encoder.mlp_hidden), config.model.encoder.embed_size)
-      self.decoder = MLPDecoder(feat_dim, tuple(config.model.decoder.mlp_hidden), obs_dim)
+      obs_dim = int(obs_shape[0])
+      self.encoder = MLPEncoder(obs_dim, enc_hidden, embed_size)
+      self.decoder = MLPDecoder(feat_dim, dec_hidden, obs_dim)
+      self.image_size = None
+      self.proprio_dim = None
+
+    elif obs_mode in ("image", "image_proprio"):
+      enc_channels = tuple(config.model.encoder.cnn_channels)
+      enc_kernels  = tuple(config.model.encoder.cnn_kernels)
+      enc_strides  = tuple(config.model.encoder.cnn_strides)
+      dec_channels = tuple(config.model.decoder.cnn_channels)
+      dec_kernels  = tuple(config.model.decoder.cnn_kernels)
+      dec_strides  = tuple(config.model.decoder.cnn_strides)
+      image_size = int(config.model.encoder.image_size)
+      self.image_size = image_size
+
+      if obs_mode == "image":
+        # obs_shape is the image shape (H, W, 3); 3-D ndarray.
+        if not (isinstance(obs_shape, tuple) and len(obs_shape) == 3):
+          raise ValueError(f"image obs_mode expects 3-D obs_shape; got {obs_shape}")
+        in_channels = int(obs_shape[2])
+        self.encoder = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
+                                  embed_dim=embed_size, image_size=image_size)
+        self.decoder = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
+                                  out_channels=in_channels, image_size=image_size)
+        self.proprio_dim = None
+
+      else:  # image_proprio
+        # obs_shape is a dict-like {"image": (H,W,3), "proprio": (P,)}.
+        if not (hasattr(obs_shape, "__getitem__") and "image" in obs_shape and "proprio" in obs_shape):
+          raise ValueError(
+            f"image_proprio obs_mode expects shape dict with 'image' and 'proprio' keys; got {obs_shape}"
+          )
+        img_shape = tuple(obs_shape["image"])
+        pro_shape = tuple(obs_shape["proprio"])
+        in_channels = int(img_shape[2])
+        proprio_dim = int(pro_shape[0])
+        self.proprio_dim = proprio_dim
+        cnn_enc = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
+                             embed_dim=embed_size, image_size=image_size)
+        cnn_dec = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
+                             out_channels=in_channels, image_size=image_size)
+        self.encoder = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
+        self.decoder = ImageProprioDecoder(feat_dim, cnn_dec, dec_hidden, proprio_dim)
+
     else:
-      raise NotImplementedError(
-        f"obs_mode={obs_mode!r} encoder/decoder not yet implemented; only 'state' is wired."
-      )
+      raise ValueError(f"unknown obs_mode={obs_mode!r}")
 
     self.rssm = RSSM(
       action_dim=action_dim,
@@ -359,30 +605,59 @@ class DreamerMLXModel:
       self._wm_bundle = _WMBundle(self.encoder, self.rssm, self.decoder, self.reward_head)
       self._wm_grad   = nn.value_and_grad(self._wm_bundle, self._wm_loss_fn)
 
+  @staticmethod
+  def _normalize_image(img: mx.array) -> mx.array:
+    """Map (uint8 ∈ [0,255]) or float ∈ [0,255] to float ∈ [-0.5, 0.5].
+
+    Matches :class:`CNNEncoder`'s normalization so encoder/decoder operate
+    in the same range and the MSE is well-scaled.
+    """
+    return img.astype(mx.float32) / 255.0 - 0.5 if img.dtype == mx.uint8 else img
+
+  def _recon_loss(self, recon, obs) -> mx.array:
+    """Reconstruction loss appropriate for the configured ``obs_mode``."""
+    if self.obs_mode == "state":
+      return cast(mx.array, ((recon - obs) ** 2).sum(-1).mean())
+    if self.obs_mode == "image":
+      target = self._normalize_image(obs)
+      return cast(mx.array, ((recon - target) ** 2).sum(axis=(-3, -2, -1)).mean())
+    if self.obs_mode == "image_proprio":
+      img_target = self._normalize_image(obs["image"])
+      img_loss = ((recon["image"] - img_target) ** 2).sum(axis=(-3, -2, -1)).mean()
+      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+      return cast(mx.array, img_loss + pro_loss)
+    raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
+
   def _wm_loss_fn(self, wm_modules, batch):
-    obs    = batch["obs"]      # (B, T, obs_dim)
+    obs    = batch["obs"]      # (B, T, ...) ndarray or dict of ndarrays
     action = batch["action"]   # (B, T, action_dim)
     reward = batch["reward"]   # (B, T)
-    B, T, _ = obs.shape
+    if isinstance(obs, dict):
+      any_leaf = next(iter(obs.values()))
+      B, T = any_leaf.shape[0], any_leaf.shape[1]
+    else:
+      B, T = obs.shape[0], obs.shape[1]
 
     embeds = wm_modules.encoder(obs)           # (B, T, embed_dim)
     state  = wm_modules.rssm.initial_state(B)
     states = []
     kls    = []
     for t in range(T):
-      state = wm_modules.rssm.obs_step(state, action[:, t], embeds[:, t])
+      action_t = action[:, t]
+      embed_t  = embeds[:, t]
+      state = wm_modules.rssm.obs_step(state, action_t, embed_t)
       states.append(state)
       kl_t = kl_gaussian(
         state["post_mean"],  state["post_std"],
         state["prior_mean"], state["prior_std"],
-      ).sum(-1)                                # sum over latent dim -> (B,)
+      ).sum(-1)
       kls.append(kl_t)
 
     feats    = mx.stack([feat(s) for s in states], axis=1)   # (B, T, feat_dim)
     recon    = wm_modules.decoder(feats)
     rew_pred = wm_modules.reward(feats)
 
-    recon_loss = ((recon - obs) ** 2).sum(-1).mean()
+    recon_loss = self._recon_loss(recon, obs)
     rew_loss   = ((rew_pred - reward) ** 2).mean()
 
     kl = mx.stack(kls, axis=1).mean()
@@ -445,7 +720,12 @@ class DreamerMLXModel:
       weights.update(flat("opt_actor",  self._opt_actor.state))
       weights.update(flat("opt_critic", self._opt_critic.state))
 
-    mx.save_safetensors(path, weights)
+    # ``resolve=True`` bakes interpolated fields (e.g. the
+    # ``derive_image_size`` resolver on ``model.encoder.image_size``) into
+    # plain values, so the saved YAML is self-contained: loading it does not
+    # require the resolver to be registered in the reader process.
+    metadata = {CONFIG_METADATA_KEY: OmegaConf.to_yaml(self.config, resolve=True)}
+    mx.save_safetensors(path, weights, metadata=metadata)
 
   def load(self, path: str) -> None:
     """Load weights previously written by :meth:`save`."""

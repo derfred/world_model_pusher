@@ -10,12 +10,13 @@ class Tracker:
   def init(self, data={}):
     self.data = data
 
+    run_name = getattr(self.config.logging, "experiment_name", None)
     if self.config.logging.logger == "wandb":
       import wandb
-      wandb.init(project=self.config.logging.project_name, config=self.config)
+      wandb.init(project=self.config.logging.project_name, name=run_name, config=self.config)
     elif self.config.logging.logger == "trackio":
       import trackio
-      trackio.init(project=self.config.logging.project_name, config=self.config)
+      trackio.init(project=self.config.logging.project_name, name=run_name, config=self.config)
     else:
       self._tracker = None
 

@@ -6,7 +6,7 @@ from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
 
-from .training.episode_loader import processor_for
+from .training.episode_processor import processor_for
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
 
@@ -23,12 +23,12 @@ class Trainer:
     self._replay_buffer = ReplayBuffer(
       capacity_steps=config.data.buffer_size,
       min_episode_len=config.training.min_episode_len,
-      processor=processor_for(self.env.obs_mode),
+      processor=processor_for(config),
       reward_fn=build_reward_fn(config.reward),
       seed=config.seed,
     )
 
-    obs_shape  = self.env.observation_space.shape
+    obs_shape  = self.env.model_obs_shape
     action_dim = int(self.env.action_space.shape[0])
 
     self.model  = build_model(config, obs_shape=obs_shape, action_dim=action_dim)

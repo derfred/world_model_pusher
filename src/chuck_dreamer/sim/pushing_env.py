@@ -273,9 +273,9 @@ class PushingEnv(gym.Env):
 
   @property
   def n_joints(self) -> int:
-    if self.scene is None:
-      raise RuntimeError("n_joints requires a scene; call reset() first.")
-    return len(self.scene.joint_names)
+    if self.scene is not None:
+      return len(self.scene.joint_names)
+    return self.generator.n_joints
 
   @property
   def observation_space(self) -> spaces.Space:  # type: ignore[override]
@@ -283,8 +283,7 @@ class PushingEnv(gym.Env):
     if self.obs_mode == "image":
       return spaces.Box(low=0, high=255, shape=(H, W, 3), dtype=np.uint8)
 
-    n_joints = self.n_joints if self.scene is not None else 6
-    proprio_dim = 3 + 4 + n_joints  # ee_pos + ee_quat + arm_qpos
+    proprio_dim = 3 + 4 + self.n_joints  # ee_pos + ee_quat + arm_qpos
 
     if self.obs_mode == "image_proprio":
       return spaces.Tuple((
@@ -294,6 +293,29 @@ class PushingEnv(gym.Env):
 
     state_dim = proprio_dim + 2  # + object_xy
     return spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+
+  @property
+  def model_obs_shape(self):
+    """Shape passed to ``build_model`` for this env's configured ``obs_mode``.
+
+    Differs from :attr:`observation_space` for image modes: the env captures
+    images at the raw render size, but the loader resizes them to
+    ``config.model.encoder.image_size`` before they reach the model.
+    Returns a tuple for ``state``/``image`` and a dict
+    ``{"image": (H, W, 3), "proprio": (P,)}`` for ``image_proprio``.
+    """
+    if self.obs_mode == "state":
+      shape = self.observation_space.shape
+      assert shape is not None, "state obs_mode should have a shaped Box observation space"
+      return tuple(shape)
+    else:
+      image_size = int(self.config.model.encoder.image_size)
+      if self.obs_mode == "image":
+        return (image_size, image_size, 3)
+      if self.obs_mode == "image_proprio":
+        proprio_dim = 3 + 4 + self.n_joints
+        return {"image": (image_size, image_size, 3), "proprio": (proprio_dim,)}
+    raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
 
   @property
   def action_space(self) -> spaces.Box:  # type: ignore[override]

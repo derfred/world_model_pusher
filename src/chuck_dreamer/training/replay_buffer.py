@@ -15,7 +15,8 @@ import numpy as np
 
 from ..reward import RewardFn
 from ..sim.step_info import StepInfo
-from .episode_loader import StateVectorProcessor, EpisodeProcessor, Progress, iter_episodes
+from .episode_loader import Progress, iter_episodes
+from .episode_processor import EpisodeProcessor, StateVectorProcessor
 
 Episode = dict[str, Any]
 
@@ -126,16 +127,36 @@ class ReplayBuffer:
       if key not in episode:
         raise ValueError(f"episode missing required key: {key!r}")
 
-    obs    = np.asarray(episode["obs"], dtype=np.float32)
-    action = np.asarray(episode["action"], dtype=np.float32)
-    reward = np.asarray(episode["reward"], dtype=np.float32)
-    done   = np.asarray(episode["done"], dtype=bool)
+    raw_obs = episode["obs"]
+    action  = np.asarray(episode["action"], dtype=np.float32)
+    reward  = np.asarray(episode["reward"], dtype=np.float32)
+    done    = np.asarray(episode["done"], dtype=bool)
 
     T = action.shape[0]
-    if obs.shape[0] != T + 1:
-      raise ValueError(
-        f"obs must have T+1 entries; got obs={obs.shape[0]}, action={T}"
-      )
+    obs: dict[str, np.ndarray] | np.ndarray
+    if isinstance(raw_obs, dict):
+      # Composite obs (e.g. image_proprio): each leaf is (T+1, ...). Image
+      # leaves stay uint8; everything else is cast to float32.
+      obs = {}
+      for k, v in raw_obs.items():
+        arr = np.asarray(v)
+        if arr.dtype != np.uint8:
+          arr = arr.astype(np.float32, copy=False)
+        if arr.shape[0] != T + 1:
+          raise ValueError(
+            f"obs[{k!r}] must have T+1 entries; got {arr.shape[0]}, action={T}"
+          )
+        obs[k] = arr
+    else:
+      arr = np.asarray(raw_obs)
+      if arr.dtype != np.uint8:
+        arr = arr.astype(np.float32, copy=False)
+      if arr.shape[0] != T + 1:
+        raise ValueError(
+          f"obs must have T+1 entries; got obs={arr.shape[0]}, action={T}"
+        )
+      obs = arr
+
     if reward.shape != (T,):
       raise ValueError(f"reward must have shape ({T},); got {reward.shape}")
     if done.shape != (T,):
@@ -180,7 +201,7 @@ class ReplayBuffer:
         return True
     return False
 
-  def sample(self, batch_size: int, seq_len: int) -> dict[str, mx.array]:
+  def sample(self, batch_size: int, seq_len: int) -> dict[str, Any]:
     """Sample a batch of ``(B, T, ...)`` sequences from single episodes."""
     if batch_size < 1 or seq_len < 1:
       raise ValueError("batch_size and seq_len must be >= 1")
@@ -204,7 +225,11 @@ class ReplayBuffer:
     probs = weights_arr / weights_arr.sum()
     ep_indices = self._rng.choice(len(eligible), size=batch_size, p=probs)
 
-    obs_batch = []
+    is_dict_obs = isinstance(eligible[0][0]["obs"], dict)
+    obs_batch: list = [] if not is_dict_obs else None  # type: ignore[assignment]
+    obs_batch_dict: dict[str, list] | None = (
+      {k: [] for k in eligible[0][0]["obs"].keys()} if is_dict_obs else None
+    )
     action_batch = []
     reward_batch = []
     done_batch = []
@@ -213,13 +238,23 @@ class ReplayBuffer:
       ep, valid_starts = eligible[idx]
       start = int(self._rng.integers(0, valid_starts))
       end = start + seq_len
-      obs_batch.append(ep["obs"][start:end])
+      if obs_batch_dict is not None:
+        for k, lst in obs_batch_dict.items():
+          lst.append(ep["obs"][k][start:end])
+      else:
+        obs_batch.append(ep["obs"][start:end])  # type: ignore[union-attr]
       action_batch.append(ep["action"][start:end])
       reward_batch.append(self._reward_slice(ep, start, end))
       done_batch.append(ep["done"][start:end])
 
+    obs_out: dict | mx.array
+    if obs_batch_dict is not None:
+      obs_out = {k: mx.array(np.stack(v, axis=0)) for k, v in obs_batch_dict.items()}
+    else:
+      obs_out = mx.array(np.stack(obs_batch, axis=0))
+
     return {
-      "obs": mx.array(np.stack(obs_batch, axis=0)),
+      "obs": obs_out,
       "action": mx.array(np.stack(action_batch, axis=0)),
       "reward": mx.array(np.stack(reward_batch, axis=0)),
       "done": mx.array(np.stack(done_batch, axis=0)),

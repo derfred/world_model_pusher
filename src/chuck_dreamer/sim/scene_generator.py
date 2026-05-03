@@ -12,6 +12,7 @@ from .scene_config import (
     LightingConfig,
     ObjectConfig,
     SceneConfig,
+    joint_names_for_robot,
     object_half_z,
 )
 
@@ -140,6 +141,18 @@ class SceneGenerator:
     self.difficulty = config.sim.difficulty
     self._preset    = _PRESETS[config.sim.difficulty]
     self.table_size = [float(v) for v in config.sim.table_size]
+
+  @property
+  def robot_type(self) -> str:
+    return self._preset["robot_type"]
+
+  @property
+  def joint_names(self) -> list[str]:
+    return joint_names_for_robot(self.robot_type)
+
+  @property
+  def n_joints(self) -> int:
+    return len(self.joint_names)
 
   # ------------------------------------------------------------------
   # Public API

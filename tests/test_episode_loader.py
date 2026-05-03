@@ -9,13 +9,22 @@ import pytest
 
 pytest.importorskip("mlx.core")
 
+from chuck_dreamer.config import (  # noqa: E402
+  CNN_BOTTLENECK_HW,
+  derive_image_size,
+  load_config,
+)
 from chuck_dreamer.training.episode_loader import (  # noqa: E402
-  ImageProcessor,
-  StateVectorProcessor,
-  _drop_last_and_pack,
   iter_episodes,
   load_hdf5_episode,
   load_rerun_episode,
+)
+from chuck_dreamer.training.episode_processor import (  # noqa: E402
+  ImageProcessor,
+  ImageProprioProcessor,
+  StateVectorProcessor,
+  _drop_last_and_pack,
+  processor_for,
 )
 from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
 from chuck_dreamer.sim.episode_writer import EpisodeWriter  # noqa: E402
@@ -132,7 +141,7 @@ def test_image_processor_returns_image_as_uint8():
     "ee_quat": np.zeros((N, 4), dtype=np.float32),
     "object_xy": np.zeros((N, 2), dtype=np.float32),
   }
-  ep = ImageProcessor()(raw)
+  ep = ImageProcessor(image_size=8)(raw)
   assert ep["obs"].shape == (N, 8, 8, 3)
   assert ep["obs"].dtype == np.uint8
   assert int(ep["obs"][3].mean()) == 3
@@ -194,7 +203,7 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
   _write_sim_episode(tmp_path, "rerun", T=20)
   _write_sim_episode(tmp_path, "rerun", T=20)
 
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=ImageProcessor(), seed=0)
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=ImageProcessor(image_size=16), seed=0)
   n = buf.load_sim_episodes(tmp_path, format="rerun")
 
   assert n == 2
@@ -286,3 +295,124 @@ def test_iter_episodes_progress_true_does_not_crash(tmp_path, capsys):
   _write_sim_episode(tmp_path, "hdf5", T=10)
   eps = list(iter_episodes(tmp_path, format="hdf5", progress=True))
   assert len(eps) == 1
+
+
+# ---------------------------------------------------------------------------
+# derive_image_size
+# ---------------------------------------------------------------------------
+
+
+def test_derive_image_size_default_4_strides_yields_64():
+  # Default config: 4 stride-2 layers => 4 * 16 = 64.
+  assert derive_image_size((2, 2, 2, 2)) == CNN_BOTTLENECK_HW * 16
+
+
+def test_derive_image_size_scales_with_layer_count():
+  # Adding a stride-2 layer doubles the input resolution.
+  assert derive_image_size((2,)) == CNN_BOTTLENECK_HW * 2
+  assert derive_image_size((2, 2)) == CNN_BOTTLENECK_HW * 4
+  assert derive_image_size((2, 2, 2)) == CNN_BOTTLENECK_HW * 8
+
+
+def test_derive_image_size_handles_mixed_strides():
+  # Non-2 strides multiply the same way.
+  assert derive_image_size((2, 3)) == CNN_BOTTLENECK_HW * 6
+  assert derive_image_size((4, 2, 2)) == CNN_BOTTLENECK_HW * 16
+
+
+def test_derive_image_size_empty_strides():
+  # No strided layers => image_size collapses to the bottleneck.
+  assert derive_image_size(()) == CNN_BOTTLENECK_HW
+
+
+# ---------------------------------------------------------------------------
+# ImageProcessor / ImageProprioProcessor: resize + obs shape
+# ---------------------------------------------------------------------------
+
+
+def _state_only_raw(N: int, img_hw: tuple[int, int]) -> dict:
+  H, W = img_hw
+  return {
+    "image": np.stack([np.full((H, W, 3), t, dtype=np.uint8) for t in range(N)]),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
+    "reward": np.zeros((N,), dtype=np.float32),
+    "timestamp": np.zeros((N,), dtype=np.float32),
+    "joint_qpos": np.full((N, 6), 0.5, dtype=np.float32),
+    "ee_pos": np.full((N, 3), 0.25, dtype=np.float32),
+    "ee_quat": np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (N, 1)),
+    "object_xy": np.zeros((N, 2), dtype=np.float32),
+  }
+
+
+def test_image_processor_resizes_to_target_size():
+  raw = _state_only_raw(N=4, img_hw=(32, 32))
+  ep = ImageProcessor(image_size=8)(raw)
+  assert ep["obs"].shape == (4, 8, 8, 3)
+  assert ep["obs"].dtype == np.uint8
+
+
+def test_image_processor_passthrough_when_already_target_size():
+  raw = _state_only_raw(N=3, img_hw=(8, 8))
+  ep = ImageProcessor(image_size=8)(raw)
+  assert ep["obs"].shape == (3, 8, 8, 3)
+  # When sizes match the resize is a no-op.
+  for t in range(3):
+    assert int(ep["obs"][t].mean()) == t
+
+
+def test_image_proprio_processor_returns_dict_obs():
+  raw = _state_only_raw(N=5, img_hw=(16, 16))
+  ep = ImageProprioProcessor(image_size=8)(raw)
+
+  assert isinstance(ep["obs"], dict)
+  assert set(ep["obs"].keys()) == {"image", "proprio"}
+  assert ep["obs"]["image"].shape == (5, 8, 8, 3)
+  assert ep["obs"]["image"].dtype == np.uint8
+  # proprio = ee_pos (3) + ee_quat (4) + joint_qpos (6) = 13.
+  assert ep["obs"]["proprio"].shape == (5, 13)
+  assert ep["obs"]["proprio"].dtype == np.float32
+
+
+def test_image_proprio_processor_excludes_object_xy_from_proprio():
+  raw = _state_only_raw(N=3, img_hw=(8, 8))
+  raw["object_xy"] = np.full((3, 2), 999.0, dtype=np.float32)
+  ep = ImageProprioProcessor(image_size=8)(raw)
+  # proprio is body-internal, so object_xy must not bleed in.
+  assert not np.any(np.isclose(ep["obs"]["proprio"], 999.0))
+
+
+# ---------------------------------------------------------------------------
+# processor_for: dispatch on config.env.obs_mode
+# ---------------------------------------------------------------------------
+
+
+def test_processor_for_state_mode_returns_state_processor():
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  p = processor_for(cfg)
+  assert isinstance(p, StateVectorProcessor)
+
+
+def test_processor_for_image_mode_uses_derived_size():
+  cfg = load_config()
+  cfg.env.obs_mode = "image"
+  cfg.model.encoder.cnn_strides = [2, 2, 2]   # 3 layers -> image_size = 32
+  p = processor_for(cfg)
+  assert isinstance(p, ImageProcessor)
+  assert p.image_size == derive_image_size((2, 2, 2))
+
+
+def test_processor_for_image_proprio_uses_derived_size():
+  cfg = load_config()
+  cfg.env.obs_mode = "image_proprio"
+  cfg.model.encoder.cnn_strides = [2, 2]      # 2 layers -> image_size = 16
+  p = processor_for(cfg)
+  assert isinstance(p, ImageProprioProcessor)
+  assert p.image_size == derive_image_size((2, 2))
+
+
+def test_processor_for_rejects_unknown_obs_mode():
+  cfg = load_config()
+  cfg.env.obs_mode = "depth"
+  with pytest.raises(ValueError):
+    processor_for(cfg)
